@@ -1,7 +1,6 @@
 """
-Pharmyrus v27 - Two-Layer Patent Search
-Layer 1: EPO OPS (CÓDIGO ORIGINAL INTACTO)
-Layer 2: Google Patents Crawler (NOVO)
+Pharmyrus v26 - Multi-Country Patent Search API
+Versão aprimorada com busca por citações e estratégias expandidas
 """
 
 from fastapi import FastAPI, HTTPException
@@ -16,14 +15,11 @@ import json
 from datetime import datetime
 import logging
 
-# Import Google Crawler Layer 2
-from google_patents_crawler import google_crawler
-
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pharmyrus")
 
-# EPO Credentials (MESMAS QUE FUNCIONAM)
+# EPO Credentials
 EPO_KEY = "G5wJypxeg0GXEJoMGP37tdK370aKxeMszGKAkD6QaR0yiR5X"
 EPO_SECRET = "zg5AJ0EDzXdJey3GaFNM8ztMVxHKXRrAihXH93iS5ZAzKPAPMFLuVUfiEuAqpdbz"
 
@@ -36,9 +32,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v27",
-    description="Two-Layer Patent Search: EPO OPS + Google Patents",
-    version="27.0"
+    title="Pharmyrus v26",
+    description="Multi-Country Patent Search API with Citation Discovery",
+    version="26.0"
 )
 
 app.add_middleware(
@@ -55,8 +51,24 @@ class SearchRequest(BaseModel):
     incluir_wo: bool = True
     max_results: int = 100
 
+class PatentResult(BaseModel):
+    patent_number: str
+    country: str
+    country_name: str
+    wo_primary: Optional[str] = None
+    title: Optional[str] = None
+    title_original: Optional[str] = None
+    abstract: Optional[str] = None
+    applicants: List[str] = []
+    inventors: List[str] = []
+    ipc_codes: List[str] = []
+    publication_date: Optional[str] = None
+    filing_date: Optional[str] = None
+    priority_date: Optional[str] = None
+    kind: Optional[str] = None
+    link_espacenet: Optional[str] = None
+    link_national: Optional[str] = None
 
-# ============= LAYER 1: EPO (CÓDIGO ORIGINAL - NÃO MODIFICADO) =============
 
 async def get_epo_token(client: httpx.AsyncClient) -> str:
     """Obtém token de acesso EPO"""
@@ -112,25 +124,45 @@ async def get_pubchem_data(client: httpx.AsyncClient, molecule: str) -> Dict:
 
 
 def build_search_queries(molecule: str, brand: str, dev_codes: List[str], cas: str = None) -> List[str]:
-    """Constrói queries otimizadas para busca EPO"""
+    """Constrói queries otimizadas para busca EPO - VERSÃO EXPANDIDA"""
     queries = []
     
+    # 1. Nome da molécula (múltiplas variações)
     queries.append(f'txt="{molecule}"')
     queries.append(f'ti="{molecule}"')
-    queries.append(f'ab="{molecule}"')
+    queries.append(f'ab="{molecule}"')  # Abstract
     
+    # 2. Nome comercial
     if brand:
         queries.append(f'txt="{brand}"')
         queries.append(f'ti="{brand}"')
     
+    # 3. Dev codes (expandido para 5)
     for code in dev_codes[:5]:
         queries.append(f'txt="{code}"')
         code_no_hyphen = code.replace("-", "")
         if code_no_hyphen != code:
             queries.append(f'txt="{code_no_hyphen}"')
     
+    # 4. CAS number
     if cas:
         queries.append(f'txt="{cas}"')
+    
+    # 5. Applicants conhecidos + keywords terapêuticas
+    applicants = ["Orion", "Bayer", "AstraZeneca", "Pfizer", "Novartis", "Roche", "Merck", "Johnson", "Bristol-Myers"]
+    keywords = ["androgen", "receptor", "crystalline", "pharmaceutical", "process", "formulation", 
+                "prostate", "cancer", "inhibitor", "modulating", "antagonist"]
+    
+    for app in applicants[:5]:
+        for kw in keywords[:4]:
+            queries.append(f'pa="{app}" and ti="{kw}"')
+    
+    # 6. Queries específicas para classes terapêuticas
+    queries.append('txt="nonsteroidal antiandrogen"')
+    queries.append('txt="androgen receptor antagonist"')
+    queries.append('txt="nmCRPC"')
+    queries.append('txt="non-metastatic" and txt="castration-resistant"')
+    queries.append('ti="androgen receptor" and ti="inhibitor"')
     
     return queries
 
@@ -171,18 +203,100 @@ async def search_epo(client: httpx.AsyncClient, token: str, query: str) -> List[
     return list(wos)
 
 
+async def search_citations(client: httpx.AsyncClient, token: str, wo_number: str) -> List[str]:
+    """Busca patentes que citam um WO específico"""
+    wos = set()
+    
+    try:
+        query = f'ct="{wo_number}"'
+        response = await client.get(
+            "https://ops.epo.org/3.2/rest-services/published-data/search",
+            params={"q": query, "Range": "1-100"},
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=30.0
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            pub_refs = data.get("ops:world-patent-data", {}).get("ops:biblio-search", {}).get("ops:search-result", {}).get("ops:publication-reference", [])
+            
+            if not isinstance(pub_refs, list):
+                pub_refs = [pub_refs] if pub_refs else []
+            
+            for ref in pub_refs:
+                doc_id = ref.get("document-id", {})
+                if isinstance(doc_id, list):
+                    doc_id = doc_id[0] if doc_id else {}
+                
+                if doc_id.get("@document-id-type") == "docdb":
+                    country = doc_id.get("country", {}).get("$", "")
+                    number = doc_id.get("doc-number", {}).get("$", "")
+                    if country == "WO" and number:
+                        wos.add(f"WO{number}")
+    
+    except Exception as e:
+        logger.debug(f"Citation search error for {wo_number}: {e}")
+    
+    return list(wos)
+
+
+async def search_related_wos(client: httpx.AsyncClient, token: str, found_wos: List[str]) -> List[str]:
+    """Busca WOs relacionados via prioridades (para encontrar patentes base)"""
+    additional_wos = set()
+    
+    for wo in found_wos[:10]:
+        try:
+            response = await client.get(
+                f"https://ops.epo.org/3.2/rest-services/family/publication/docdb/{wo}",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                family = data.get("ops:world-patent-data", {}).get("ops:patent-family", {})
+                
+                members = family.get("ops:family-member", [])
+                if not isinstance(members, list):
+                    members = [members]
+                
+                for m in members:
+                    prio = m.get("priority-claim", [])
+                    if not isinstance(prio, list):
+                        prio = [prio] if prio else []
+                    
+                    for p in prio:
+                        doc_id = p.get("document-id", {})
+                        if isinstance(doc_id, list):
+                            doc_id = doc_id[0] if doc_id else {}
+                        country = doc_id.get("country", {}).get("$", "")
+                        number = doc_id.get("doc-number", {}).get("$", "")
+                        if country == "WO" and number:
+                            wo_num = f"WO{number}"
+                            if wo_num not in found_wos:
+                                additional_wos.add(wo_num)
+            
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            logger.debug(f"Error searching related WOs for {wo}: {e}")
+    
+    return list(additional_wos)
+
+
 async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: str, 
                             target_countries: List[str]) -> Dict[str, List[Dict]]:
     """Extrai patentes da família de um WO para países alvo"""
     patents = {cc: [] for cc in target_countries}
     
     try:
+        # Tentar com biblio primeiro
         response = await client.get(
             f"https://ops.epo.org/3.2/rest-services/family/publication/docdb/{wo_number}/biblio",
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=30.0
         )
         
+        # Se 413 (família muito grande), tentar sem biblio
         if response.status_code == 413:
             response = await client.get(
                 f"https://ops.epo.org/3.2/rest-services/family/publication/docdb/{wo_number}",
@@ -216,8 +330,10 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                     if country in target_countries and number:
                         patent_num = f"{country}{number}"
                         
+                        # Extrair dados bibliográficos se disponíveis
                         bib = member.get("exchange-document", {}).get("bibliographic-data", {}) if "exchange-document" in member else {}
                         
+                        # Título
                         titles = bib.get("invention-title", [])
                         if isinstance(titles, dict):
                             titles = [titles]
@@ -229,6 +345,7 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                             else:
                                 title_orig = t.get("$")
                         
+                        # Applicants
                         applicants = []
                         parties = bib.get("parties", {}).get("applicants", {}).get("applicant", [])
                         if isinstance(parties, dict):
@@ -238,6 +355,7 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                             if name:
                                 applicants.append(name)
                         
+                        # Data publicação
                         pub_date = doc_id.get("date", {}).get("$", "")
                         
                         patent_data = {
@@ -253,10 +371,7 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                             "publication_date": pub_date,
                             "filing_date": "",
                             "priority_date": None,
-                            "kind": kind,
-                            "link_espacenet": f"https://worldwide.espacenet.com/patent/search?q=pn%3D{patent_num}",
-                            "link_national": None,
-                            "country_name": COUNTRY_CODES.get(country, country)
+                            "kind": kind
                         }
                         
                         patents[country].append(patent_data)
@@ -267,20 +382,33 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
     return patents
 
 
-# ============= ENDPOINTS =============
+def generate_links(patent_number: str, country: str) -> Dict[str, str]:
+    """Gera links para Espacenet e escritórios nacionais"""
+    links = {
+        "link_espacenet": f"https://worldwide.espacenet.com/patent/search?q=pn%3D{patent_number}"
+    }
+    
+    national_links = {
+        "BR": f"https://busca.inpi.gov.br/pePI/servlet/PatenteServletController?Action=detail&CodPedido={patent_number}",
+        "US": f"https://patents.google.com/patent/{patent_number}",
+        "MX": f"https://siga.impi.gob.mx/",
+        "AR": f"https://portaltramites.inpi.gob.ar/",
+    }
+    
+    if country in national_links:
+        links["link_national"] = national_links[country]
+    
+    return links
+
 
 @app.get("/")
 async def root():
-    return {
-        "message": "Pharmyrus v27 - Two-Layer Patent Search", 
-        "version": "27.0",
-        "layers": ["EPO OPS (Layer 1)", "Google Patents (Layer 2)"]
-    }
+    return {"message": "Pharmyrus v26 - Patent Search API with Citation Discovery", "version": "26.0"}
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "27.0"}
+    return {"status": "healthy", "version": "26.0"}
 
 
 @app.get("/countries")
@@ -290,11 +418,7 @@ async def list_countries():
 
 @app.post("/search")
 async def search_patents(request: SearchRequest):
-    """
-    Busca em 2 camadas:
-    1. EPO OPS (código original que funciona)
-    2. Google Patents (crawler para WOs adicionais)
-    """
+    """Busca patentes para uma molécula em múltiplos países"""
     
     start_time = datetime.now()
     
@@ -305,46 +429,56 @@ async def search_patents(request: SearchRequest):
     if not target_countries:
         target_countries = ["BR"]
     
-    logger.info(f"🚀 Search v27 started: {molecule} | Countries: {target_countries}")
+    logger.info(f"Search started: {molecule} | Countries: {target_countries}")
     
     async with httpx.AsyncClient() as client:
-        # ===== LAYER 1: EPO (CÓDIGO ORIGINAL) =====
-        logger.info("🔵 LAYER 1: EPO OPS")
-        
+        # 1. Autenticar EPO
         token = await get_epo_token(client)
-        pubchem = await get_pubchem_data(client, molecule)
-        logger.info(f"   PubChem: {len(pubchem['dev_codes'])} dev codes, CAS: {pubchem['cas']}")
         
+        # 2. Enriquecer com PubChem
+        pubchem = await get_pubchem_data(client, molecule)
+        logger.info(f"PubChem: {len(pubchem['dev_codes'])} dev codes, CAS: {pubchem['cas']}")
+        
+        # 3. Construir e executar queries
         queries = build_search_queries(molecule, brand, pubchem["dev_codes"], pubchem["cas"])
         
-        epo_wos = set()
+        all_wos = set()
         for query in queries:
             wos = await search_epo(client, token, query)
-            epo_wos.update(wos)
+            all_wos.update(wos)
             await asyncio.sleep(0.2)
         
-        logger.info(f"   ✅ EPO found: {len(epo_wos)} WOs")
+        logger.info(f"Found {len(all_wos)} WOs from text searches")
         
-        # ===== LAYER 2: GOOGLE PATENTS (NOVO) =====
-        logger.info("🟢 LAYER 2: Google Patents")
+        # 4. Buscar WOs relacionados via prioridades
+        if all_wos:
+            related_wos = await search_related_wos(client, token, list(all_wos)[:10])
+            if related_wos:
+                logger.info(f"Found {len(related_wos)} WOs from priority links")
+                all_wos.update(related_wos)
         
-        google_wos = await google_crawler.enrich_with_google(
-            molecule=molecule,
-            dev_codes=pubchem["dev_codes"],
-            epo_wos=epo_wos
-        )
+        # 5. NOVO: Buscar WOs via citações dos principais WOs encontrados
+        key_wos = list(all_wos)[:5]  # Top 5 WOs para buscar citações
+        citation_wos = set()
+        for wo in key_wos:
+            citing = await search_citations(client, token, wo)
+            citation_wos.update(citing)
+            await asyncio.sleep(0.2)
         
-        # Merge WOs
-        all_wos = epo_wos | google_wos
-        logger.info(f"   ✅ Total WOs (EPO + Google): {len(all_wos)}")
+        if citation_wos:
+            new_from_citations = citation_wos - all_wos
+            logger.info(f"Found {len(new_from_citations)} NEW WOs from citations")
+            all_wos.update(citation_wos)
         
-        # Extrair patentes dos países alvo
+        logger.info(f"Total: {len(all_wos)} unique WO patents")
+        
+        # 6. Extrair patentes dos países alvo de cada WO
         patents_by_country = {cc: [] for cc in target_countries}
         seen_patents = set()
         
         for i, wo in enumerate(sorted(all_wos)):
             if i > 0 and i % 20 == 0:
-                logger.info(f"   Processing WO {i}/{len(all_wos)}...")
+                logger.info(f"Processing WO {i}/{len(all_wos)}...")
             
             family_patents = await get_family_patents(client, token, wo, target_countries)
             
@@ -353,10 +487,16 @@ async def search_patents(request: SearchRequest):
                     pnum = p["patent_number"]
                     if pnum not in seen_patents:
                         seen_patents.add(pnum)
+                        
+                        links = generate_links(pnum, country)
+                        p.update(links)
+                        p["country_name"] = COUNTRY_CODES.get(country, country)
+                        
                         patents_by_country[country].append(p)
             
             await asyncio.sleep(0.3)
         
+        # 7. Consolidar resultados
         all_patents = []
         for country, patents in patents_by_country.items():
             all_patents.extend(patents)
@@ -372,13 +512,10 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v27",
-                "sources": ["EPO OPS", "Google Patents"]
+                "version": "Pharmyrus v26"
             },
             "summary": {
                 "total_wos": len(all_wos),
-                "epo_wos": len(epo_wos),
-                "google_wos": len(google_wos),
                 "total_patents": len(all_patents),
                 "by_country": {c: len(patents_by_country.get(c, [])) for c in target_countries},
                 "pubchem_dev_codes": pubchem["dev_codes"],
