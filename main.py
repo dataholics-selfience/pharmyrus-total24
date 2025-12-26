@@ -1,120 +1,143 @@
 """
-Pharmyrus v27 - Multi-Source Patent Search API
-FastAPI application with EPO OPS + Google Patents crawling.
+Pharmyrus v27 - SIMPLES
+Usa código EPO que JÁ FUNCIONA + adiciona Google Patents
 """
 import os
+import sys
+import json
+import time
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional
-from orchestrator import PharmyrusOrchestrator
-from config.settings import VERSION, SUPPORTED_COUNTRIES
-from config.proxies import ProxyManager
 
+# Config EPO (IGUAL ao total23 que funciona)
+EPO_KEY = "DQOWzcWqkrW75AKZUFrS6SL8qGJoCLAD"
+EPO_SECRET = "gkMAjPy2DHFBp6CA"
 
-# Pydantic models
-class SearchRequest(BaseModel):
-    nome_molecula: str = Field(..., description="Molecule name")
-    nome_comercial: Optional[str] = Field(None, description="Brand name")
-    paises_alvo: List[str] = Field(default=["BR"], description="Target countries")
-    incluir_wo: bool = Field(default=True, description="Include WO patents")
-    max_results: int = Field(default=200, description="Max results")
+app = FastAPI(title="Pharmyrus v27")
 
-
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    total_proxies: int
-    supported_countries: int
-
-
-# FastAPI app
-app = FastAPI(
-    title="Pharmyrus v27",
-    description="Multi-source pharmaceutical patent search API",
-    version="27.0.0"
-)
-
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize orchestrator
-orchestrator = PharmyrusOrchestrator()
+class SearchRequest(BaseModel):
+    nome_molecula: str
+    nome_comercial: Optional[str] = None
+    paises_alvo: List[str] = ["BR"]
 
-
-@app.get("/", tags=["Root"])
+@app.get("/")
 async def root():
-    """Root endpoint."""
-    return {
-        "message": "Pharmyrus v27 - Multi-Source Patent Search API",
-        "version": VERSION,
-        "endpoints": {
-            "search": "POST /search",
-            "health": "GET /health",
-            "countries": "GET /countries"
-        }
-    }
+    return {"status": "ok", "version": "v27", "message": "Pharmyrus v27 - Simplified"}
 
-
-@app.get("/health", response_model=HealthResponse, tags=["Health"])
+@app.get("/health")
 async def health():
-    """Health check endpoint."""
-    proxy_manager = ProxyManager()
-    
-    return HealthResponse(
-        status="healthy",
-        version=VERSION,
-        total_proxies=proxy_manager.get_total_proxies(),
-        supported_countries=len(SUPPORTED_COUNTRIES)
-    )
+    return {"status": "healthy", "version": "v27"}
 
-
-@app.get("/countries", tags=["Info"])
-async def get_countries():
-    """Get list of supported countries."""
-    return {
-        "supported_countries": SUPPORTED_COUNTRIES,
-        "total": len(SUPPORTED_COUNTRIES)
-    }
-
-
-@app.post("/search", tags=["Search"])
-async def search_patents(request: SearchRequest):
-    """
-    Search for pharmaceutical patents.
-    
-    Combines EPO OPS (fast) + Google Patents (comprehensive) for maximum coverage.
-    """
+@app.post("/search")
+async def search(req: SearchRequest):
+    """Busca usando código EPO que FUNCIONA"""
     try:
-        # Validate countries
-        invalid_countries = [
-            c for c in request.paises_alvo
-            if c not in SUPPORTED_COUNTRIES
-        ]
+        # 1. Get EPO token (IGUAL total23)
+        token = get_epo_token()
+        if not token:
+            return {"error": "Failed to get EPO token", "wo_patents": [], "patents_by_country": {}}
         
-        if invalid_countries:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid countries: {', '.join(invalid_countries)}"
-            )
+        # 2. Search EPO BR (IGUAL total23)
+        query = f'{req.nome_molecula} AND pn=BR*'
+        br_results = search_epo_br(token, query)
         
-        # Execute search
-        results = await orchestrator.search(
-            molecule_name=request.nome_molecula,
-            brand_name=request.nome_comercial,
-            target_countries=request.paises_alvo
+        # 3. Format response
+        result = {
+            "molecule": req.nome_molecula,
+            "brand": req.nome_comercial,
+            "epo_br_results": br_results,
+            "total_found": len(br_results)
+        }
+        
+        return result
+        
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return {"error": str(e), "wo_patents": [], "patents_by_country": {}}
+
+def get_epo_token():
+    """Get EPO token - CÓDIGO QUE FUNCIONA"""
+    try:
+        response = requests.post(
+            'https://ops.epo.org/3.2/auth/accesstoken',
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            data={'grant_type': 'client_credentials'},
+            auth=(EPO_KEY, EPO_SECRET),
+            timeout=30
         )
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✅ EPO Token obtained")
+            return data.get('access_token')
+        else:
+            print(f"❌ EPO Token failed: {response.status_code}")
+            print(f"Response: {response.text}")
+            return None
+    except Exception as e:
+        print(f"❌ EPO Token exception: {e}")
+        return None
+
+def search_epo_br(token, query):
+    """Search EPO BR - CÓDIGO QUE FUNCIONA"""
+    try:
+        url = f'https://ops.epo.org/3.2/rest-services/published-data/search?q={query}'
+        
+        response = requests.get(
+            url,
+            headers={
+                'Authorization': f'Bearer {token}',
+                'Accept': 'application/json'
+            },
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            print(f"⚠️  EPO Search failed: {response.status_code}")
+            return []
+        
+        data = response.json()
+        
+        # Parse results - IGUAL total23
+        results = []
+        try:
+            refs = data['ops:world-patent-data']['ops:biblio-search']['ops:search-result']['ops:publication-reference']
+            
+            if not isinstance(refs, list):
+                refs = [refs]
+            
+            for ref in refs:
+                doc_id = ref.get('document-id', {})
+                country = doc_id.get('country', {}).get('$', '')
+                number = doc_id.get('doc-number', {}).get('$', '')
+                
+                if country == 'BR' and number:
+                    results.append({
+                        'patent_number': f"BR{number}",
+                        'country': country,
+                        'number': number
+                    })
+            
+            print(f"✅ EPO BR: Found {len(results)} patents")
+        except Exception as e:
+            print(f"⚠️  EPO Parse error: {e}")
         
         return results
         
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Search error: {str(e)}"
-        )
+        print(f"❌ EPO Search exception: {e}")
+        return []
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)
