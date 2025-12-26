@@ -1,7 +1,8 @@
 """
-Pharmyrus v27.1 - CORRECTED Two-Layer Patent Search
-Layer 1: EPO OPS (COMPLETO do v26 - TODAS funções)
-Layer 2: Google Patents (AGRESSIVO - todas variações)
+Pharmyrus v27.2 DYNAMIC - Patent Search System
+Layer 0: Data Enrichment (PubChem, OpenFDA, PubMed)
+Layer 1: EPO OPS (Complete with feedback loops)
+Layer 2: Google Patents (Dynamic with enriched data)
 """
 
 from fastapi import FastAPI, HTTPException
@@ -16,18 +17,23 @@ import json
 from datetime import datetime
 import logging
 
-# Import Google Crawler Layer 2
+# Import custom modules
+from data_enrichment import data_enrichment
 from google_patents_crawler import google_crawler
+from search_state import SearchState
 
-# Logging
-logging.basicConfig(level=logging.INFO)
+# Logging avançado
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger("pharmyrus")
 
-# EPO Credentials (MESMAS QUE FUNCIONAM)
+# EPO Credentials
 EPO_KEY = "G5wJypxeg0GXEJoMGP37tdK370aKxeMszGKAkD6QaR0yiR5X"
 EPO_SECRET = "zg5AJ0EDzXdJey3GaFNM8ztMVxHKXRrAihXH93iS5ZAzKPAPMFLuVUfiEuAqpdbz"
 
-# Country codes supported
+# Country codes
 COUNTRY_CODES = {
     "BR": "Brazil", "US": "United States", "EP": "European Patent",
     "CN": "China", "JP": "Japan", "KR": "South Korea", "IN": "India",
@@ -36,9 +42,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v27.1",
-    description="Two-Layer Patent Search: EPO OPS (FULL) + Google Patents (AGGRESSIVE)",
-    version="27.1"
+    title="Pharmyrus v27.2",
+    description="Dynamic Patent Search with Multi-Source Data Enrichment",
+    version="27.2"
 )
 
 app.add_middleware(
@@ -56,10 +62,10 @@ class SearchRequest(BaseModel):
     max_results: int = 100
 
 
-# ============= LAYER 1: EPO (CÓDIGO COMPLETO v26) =============
+# ============= EPO LAYER FUNCTIONS (MANTIDAS DO v27.1) =============
 
 async def get_epo_token(client: httpx.AsyncClient) -> str:
-    """Obtém token de acesso EPO"""
+    """Obtém token EPO"""
     creds = f"{EPO_KEY}:{EPO_SECRET}"
     b64_creds = base64.b64encode(creds.encode()).decode()
     
@@ -79,43 +85,18 @@ async def get_epo_token(client: httpx.AsyncClient) -> str:
     return response.json()["access_token"]
 
 
-async def get_pubchem_data(client: httpx.AsyncClient, molecule: str) -> Dict:
-    """Obtém dados do PubChem (dev codes, CAS, sinônimos)"""
-    try:
-        response = await client.get(
-            f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{molecule}/synonyms/JSON",
-            timeout=30.0
-        )
-        if response.status_code == 200:
-            data = response.json()
-            synonyms = data.get("InformationList", {}).get("Information", [{}])[0].get("Synonym", [])
-            
-            dev_codes = []
-            cas = None
-            
-            for syn in synonyms[:100]:
-                if re.match(r'^[A-Z]{2,5}-?\d{3,7}[A-Z]?$', syn, re.I) and len(syn) < 20:
-                    if syn not in dev_codes:
-                        dev_codes.append(syn)
-                if re.match(r'^\d{2,7}-\d{2}-\d$', syn) and not cas:
-                    cas = syn
-            
-            return {
-                "dev_codes": dev_codes[:10],
-                "cas": cas,
-                "synonyms": synonyms[:20]
-            }
-    except Exception as e:
-        logger.warning(f"PubChem error: {e}")
-    
-    return {"dev_codes": [], "cas": None, "synonyms": []}
-
-
-def build_search_queries(molecule: str, brand: str, dev_codes: List[str], cas: str = None) -> List[str]:
-    """Constrói queries EXPANDIDAS para busca EPO - VERSÃO COMPLETA v26"""
+def build_search_queries_dynamic(
+    molecule: str,
+    brand: str,
+    enriched_data: Dict,
+    found_assignees: Set[str] = None
+) -> List[str]:
+    """
+    Constrói queries EPO DINÂMICAS usando dados enriched
+    """
     queries = []
     
-    # 1. Nome da molécula (múltiplas variações)
+    # 1. Nome da molécula
     queries.append(f'txt="{molecule}"')
     queries.append(f'ti="{molecule}"')
     queries.append(f'ab="{molecule}"')
@@ -125,27 +106,43 @@ def build_search_queries(molecule: str, brand: str, dev_codes: List[str], cas: s
         queries.append(f'txt="{brand}"')
         queries.append(f'ti="{brand}"')
     
-    # 3. Dev codes (expandido para 5)
-    for code in dev_codes[:5]:
+    # 3. SINÔNIMOS extraídos (DINÂMICO!)
+    synonyms = enriched_data.get("synonyms", [])
+    for syn in synonyms[:10]:  # Top 10
+        if len(syn) > 4 and len(syn) < 50:
+            queries.append(f'txt="{syn}"')
+    
+    # 4. DEV CODES extraídos (DINÂMICO!)
+    dev_codes = enriched_data.get("dev_codes", [])
+    for code in dev_codes[:10]:  # Top 10
         queries.append(f'txt="{code}"')
         code_no_hyphen = code.replace("-", "")
         if code_no_hyphen != code:
             queries.append(f'txt="{code_no_hyphen}"')
     
-    # 4. CAS number
-    if cas:
+    # 5. CAS NUMBERS extraídos (DINÂMICO!)
+    cas_numbers = enriched_data.get("cas_numbers", [])
+    for cas in cas_numbers:
         queries.append(f'txt="{cas}"')
     
-    # 5. Applicants conhecidos + keywords terapêuticas (CRÍTICO!)
-    applicants = ["Orion", "Bayer", "AstraZeneca", "Pfizer", "Novartis", "Roche", "Merck", "Johnson", "Bristol-Myers"]
-    keywords = ["androgen", "receptor", "crystalline", "pharmaceutical", "process", "formulation", 
-                "prostate", "cancer", "inhibitor", "modulating", "antagonist"]
+    # 6. COMPANIES extraídas (DINÂMICO!)
+    companies = enriched_data.get("companies", [])
+    if companies:
+        keywords = ["androgen", "receptor", "crystalline", "pharmaceutical", 
+                   "cancer", "inhibitor", "modulating", "antagonist"]
+        
+        for company in companies[:10]:  # Top 10 empresas
+            for kw in keywords[:4]:  # Top 4 keywords
+                queries.append(f'pa="{company}" and ti="{kw}"')
     
-    for app in applicants[:5]:
-        for kw in keywords[:4]:
-            queries.append(f'pa="{app}" and ti="{kw}"')
+    # 7. ASSIGNEES ENCONTRADOS (FEEDBACK LOOP!)
+    if found_assignees:
+        keywords = ["androgen", "receptor", "crystalline", "pharmaceutical"]
+        for assignee in list(found_assignees)[:5]:  # Top 5 assignees
+            for kw in keywords[:2]:
+                queries.append(f'pa="{assignee}" and ti="{kw}"')
     
-    # 6. Queries específicas para classes terapêuticas
+    # 8. Queries terapêuticas específicas
     queries.append('txt="nonsteroidal antiandrogen"')
     queries.append('txt="androgen receptor antagonist"')
     queries.append('txt="nmCRPC"')
@@ -155,8 +152,8 @@ def build_search_queries(molecule: str, brand: str, dev_codes: List[str], cas: s
     return queries
 
 
-async def search_epo(client: httpx.AsyncClient, token: str, query: str) -> List[str]:
-    """Executa busca no EPO e retorna lista de WOs"""
+async def search_epo(client: httpx.AsyncClient, token: str, query: str, state: SearchState) -> List[str]:
+    """Executa busca EPO e registra no state"""
     wos = set()
     
     try:
@@ -184,15 +181,18 @@ async def search_epo(client: httpx.AsyncClient, token: str, query: str) -> List[
                     number = doc_id.get("doc-number", {}).get("$", "")
                     if country == "WO" and number:
                         wos.add(f"WO{number}")
+            
+            # Registrar query no state
+            state.add_query_executed("epo_text", query, len(wos))
         
     except Exception as e:
-        logger.debug(f"Search error for query '{query}': {e}")
+        logger.debug(f"EPO search error for '{query}': {e}")
     
     return list(wos)
 
 
-async def search_citations(client: httpx.AsyncClient, token: str, wo_number: str) -> List[str]:
-    """Busca patentes que citam um WO específico - CRÍTICO!"""
+async def search_citations(client: httpx.AsyncClient, token: str, wo_number: str, state: SearchState) -> List[str]:
+    """Busca citações"""
     wos = set()
     
     try:
@@ -221,6 +221,8 @@ async def search_citations(client: httpx.AsyncClient, token: str, wo_number: str
                     number = doc_id.get("doc-number", {}).get("$", "")
                     if country == "WO" and number:
                         wos.add(f"WO{number}")
+            
+            state.add_query_executed("epo_citation", query, len(wos))
     
     except Exception as e:
         logger.debug(f"Citation search error for {wo_number}: {e}")
@@ -228,9 +230,11 @@ async def search_citations(client: httpx.AsyncClient, token: str, wo_number: str
     return list(wos)
 
 
-async def search_related_wos(client: httpx.AsyncClient, token: str, found_wos: List[str]) -> List[str]:
-    """Busca WOs relacionados via prioridades - CRÍTICO!"""
+async def search_related_wos(client: httpx.AsyncClient, token: str, found_wos: List[str], state: SearchState) -> List[str]:
+    """Busca WOs relacionados via prioridades"""
     additional_wos = set()
+    
+    logger.info(f"   🔄 EPO priority search: Checking {len(found_wos[:10])} WOs...")
     
     for wo in found_wos[:10]:
         try:
@@ -273,7 +277,7 @@ async def search_related_wos(client: httpx.AsyncClient, token: str, found_wos: L
 
 async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: str, 
                             target_countries: List[str]) -> Dict[str, List[Dict]]:
-    """Extrai patentes da família de um WO para países alvo"""
+    """Extrai patentes da família"""
     patents = {cc: [] for cc in target_countries}
     
     try:
@@ -372,15 +376,19 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
 @app.get("/")
 async def root():
     return {
-        "message": "Pharmyrus v27.1 - Two-Layer Patent Search (CORRECTED)", 
-        "version": "27.1",
-        "layers": ["EPO OPS (FULL v26)", "Google Patents (AGGRESSIVE)"]
+        "message": "Pharmyrus v27.2 - Dynamic Patent Search", 
+        "version": "27.2",
+        "layers": [
+            "Layer 0: Data Enrichment (PubChem, OpenFDA, PubMed)",
+            "Layer 1: EPO OPS (Dynamic with feedback)",
+            "Layer 2: Google Patents (Dynamic with enriched data)"
+        ]
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "27.1"}
+    return {"status": "healthy", "version": "27.2"}
 
 
 @app.get("/countries")
@@ -391,9 +399,7 @@ async def list_countries():
 @app.post("/search")
 async def search_patents(request: SearchRequest):
     """
-    Busca em 2 camadas COMPLETAS:
-    1. EPO OPS (código COMPLETO v26 - citations, related, queries expandidas)
-    2. Google Patents (crawler AGRESSIVO - todas variações)
+    Busca DINÂMICA em 3 camadas com feedback loops
     """
     
     start_time = datetime.now()
@@ -405,68 +411,115 @@ async def search_patents(request: SearchRequest):
     if not target_countries:
         target_countries = ["BR"]
     
-    logger.info(f"🚀 Search v27.1 started: {molecule} | Countries: {target_countries}")
+    logger.info(f"{'='*80}")
+    logger.info(f"🚀 PHARMYRUS v27.2 DYNAMIC SEARCH STARTED")
+    logger.info(f"{'='*80}")
+    logger.info(f"Molecule: {molecule}")
+    logger.info(f"Brand: {brand}")
+    logger.info(f"Countries: {target_countries}")
+    
+    # Inicializar state
+    state = SearchState(molecule)
     
     async with httpx.AsyncClient() as client:
-        # ===== LAYER 1: EPO (CÓDIGO COMPLETO v26) =====
-        logger.info("🔵 LAYER 1: EPO OPS (FULL)")
+        # ===== LAYER 0: DATA ENRICHMENT =====
+        logger.info(f"\n{'='*80}")
+        logger.info(f"📊 LAYER 0: DATA ENRICHMENT")
+        logger.info(f"{'='*80}")
+        
+        enriched_data = await data_enrichment.run_all_enrichment(client, molecule, brand)
+        state.mark_enrichment_complete("pubchem")
+        state.mark_enrichment_complete("openfda")
+        state.mark_enrichment_complete("pubmed")
+        
+        # ===== LAYER 1: EPO OPS =====
+        logger.info(f"\n{'='*80}")
+        logger.info(f"🔵 LAYER 1: EPO OPS (DYNAMIC)")
+        logger.info(f"{'='*80}")
         
         token = await get_epo_token(client)
-        pubchem = await get_pubchem_data(client, molecule)
-        logger.info(f"   PubChem: {len(pubchem['dev_codes'])} dev codes, CAS: {pubchem['cas']}")
+        logger.info("   ✅ EPO token obtained")
         
-        # Queries COMPLETAS
-        queries = build_search_queries(molecule, brand, pubchem["dev_codes"], pubchem["cas"])
-        logger.info(f"   Executing {len(queries)} EPO queries...")
+        # Build queries dinâmicas
+        queries = build_search_queries_dynamic(
+            molecule,
+            brand,
+            enriched_data,
+            state.assignees_found
+        )
         
+        state.epo_status["queries_total"] = len(queries)
+        logger.info(f"   📊 Generated {len(queries)} dynamic EPO queries")
+        
+        # Text search
         epo_wos = set()
-        for query in queries:
-            wos = await search_epo(client, token, query)
+        for i, query in enumerate(queries):
+            wos = await search_epo(client, token, query, state)
             epo_wos.update(wos)
+            state.epo_status["queries_executed"] = i + 1
             await asyncio.sleep(0.2)
         
+        state.add_wos("epo_text", epo_wos)
+        state.mark_epo_phase_complete("text_search")
         logger.info(f"   ✅ EPO text search: {len(epo_wos)} WOs")
         
-        # Buscar WOs relacionados via prioridades (CRÍTICO!)
+        # Priority search
         if epo_wos:
-            related_wos = await search_related_wos(client, token, list(epo_wos)[:10])
+            related_wos = await search_related_wos(client, token, list(epo_wos), state)
             if related_wos:
-                logger.info(f"   ✅ EPO priority search: {len(related_wos)} additional WOs")
+                state.add_wos("epo_priority", set(related_wos))
                 epo_wos.update(related_wos)
+                state.mark_epo_phase_complete("priority_search")
+                logger.info(f"   ✅ EPO priority search: {len(related_wos)} additional WOs")
+            else:
+                state.mark_epo_phase_complete("priority_search")
+                logger.info(f"   ✅ EPO priority search: 0 additional WOs")
         
-        # Buscar WOs via citações (CRÍTICO!)
+        # Citation search
         key_wos = list(epo_wos)[:5]
         citation_wos = set()
         for wo in key_wos:
-            citing = await search_citations(client, token, wo)
+            citing = await search_citations(client, token, wo, state)
             citation_wos.update(citing)
             await asyncio.sleep(0.2)
         
         if citation_wos:
             new_from_citations = citation_wos - epo_wos
-            logger.info(f"   ✅ EPO citation search: {len(new_from_citations)} NEW WOs from citations")
+            state.add_wos("epo_citation", new_from_citations)
             epo_wos.update(citation_wos)
+            logger.info(f"   ✅ EPO citation search: {len(new_from_citations)} NEW WOs")
+        else:
+            logger.info(f"   ✅ EPO citation search: 0 NEW WOs")
         
+        state.mark_epo_phase_complete("citation_search")
         logger.info(f"   ✅ EPO TOTAL: {len(epo_wos)} WOs")
         
-        # ===== LAYER 2: GOOGLE PATENTS (AGRESSIVO) =====
-        logger.info("🟢 LAYER 2: Google Patents (AGGRESSIVE)")
+        # ===== LAYER 2: GOOGLE PATENTS =====
+        logger.info(f"\n{'='*80}")
+        logger.info(f"🟢 LAYER 2: GOOGLE PATENTS (DYNAMIC)")
+        logger.info(f"{'='*80}")
         
         google_wos = await google_crawler.enrich_with_google(
             molecule=molecule,
-            brand=brand,
-            dev_codes=pubchem["dev_codes"],
-            cas=pubchem["cas"],
-            epo_wos=epo_wos
+            enriched_data=enriched_data,
+            epo_wos=epo_wos,
+            state=state
         )
         
+        state.add_wos("google", google_wos)
         logger.info(f"   ✅ Google found: {len(google_wos)} NEW WOs")
         
         # Merge WOs
         all_wos = epo_wos | google_wos
-        logger.info(f"   ✅ Total WOs (EPO + Google): {len(all_wos)}")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"✅ TOTAL WOs: {len(all_wos)} (EPO: {len(epo_wos)} + Google: {len(google_wos)})")
+        logger.info(f"{'='*80}")
         
         # Extrair patentes dos países alvo
+        logger.info(f"\n{'='*80}")
+        logger.info(f"🔄 FAMILY MAPPING: Extracting patents for {target_countries}")
+        logger.info(f"{'='*80}")
+        
         patents_by_country = {cc: [] for cc in target_countries}
         seen_patents = set()
         
@@ -493,6 +546,16 @@ async def search_patents(request: SearchRequest):
         
         elapsed = (datetime.now() - start_time).total_seconds()
         
+        # Final summary
+        logger.info(f"\n{'='*80}")
+        logger.info(f"🎉 SEARCH COMPLETE")
+        logger.info(f"{'='*80}")
+        logger.info(f"Total WOs: {len(all_wos)}")
+        logger.info(f"Total Patents: {len(all_patents)}")
+        logger.info(f"By country: {', '.join([f'{c}: {len(patents_by_country.get(c, []))}' for c in target_countries])}")
+        logger.info(f"Elapsed: {elapsed:.2f}s")
+        logger.info(f"{'='*80}\n")
+        
         return {
             "metadata": {
                 "molecule": molecule,
@@ -500,8 +563,20 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v27.1 CORRECTED",
-                "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)"]
+                "version": "Pharmyrus v27.2 DYNAMIC",
+                "sources": [
+                    "PubChem (enrichment)",
+                    "OpenFDA (enrichment)",
+                    "PubMed (enrichment)",
+                    "EPO OPS (full)",
+                    "Google Patents (dynamic)"
+                ]
+            },
+            "enrichment": {
+                "synonyms_found": len(enriched_data.get("synonyms", [])),
+                "dev_codes_found": len(enriched_data.get("dev_codes", [])),
+                "cas_numbers_found": len(enriched_data.get("cas_numbers", [])),
+                "companies_found": len(enriched_data.get("companies", [])),
             },
             "summary": {
                 "total_wos": len(all_wos),
@@ -509,12 +584,13 @@ async def search_patents(request: SearchRequest):
                 "google_wos": len(google_wos),
                 "total_patents": len(all_patents),
                 "by_country": {c: len(patents_by_country.get(c, [])) for c in target_countries},
-                "pubchem_dev_codes": pubchem["dev_codes"],
-                "pubchem_cas": pubchem["cas"]
+                "wos_by_source": state.get_summary()["wos_by_source"],
+                "assignees_discovered": state.get_summary()["assignees_found"],
             },
             "wo_patents": sorted(list(all_wos)),
             "patents_by_country": patents_by_country,
-            "all_patents": all_patents
+            "all_patents": all_patents,
+            "search_state": state.get_summary()
         }
 
 
