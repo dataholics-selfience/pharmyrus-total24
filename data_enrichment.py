@@ -27,9 +27,7 @@ class DataEnrichment:
         }
     
     async def enrich_from_pubchem(self, client: httpx.AsyncClient, molecule: str) -> Dict:
-        """
-        PubChem: Sinônimos, CAS, InChI, SMILES, formulas moleculares
-        """
+        """PubChem: Sinônimos, CAS, InChI, SMILES, formulas moleculares"""
         logger.info(f"📊 ENRICHMENT: PubChem for {molecule}")
         
         try:
@@ -43,7 +41,7 @@ class DataEnrichment:
                 data = response.json()
                 synonyms = data.get("InformationList", {}).get("Information", [{}])[0].get("Synonym", [])
                 
-                for syn in synonyms[:200]:  # Pegar mais sinônimos
+                for syn in synonyms[:200]:
                     syn_clean = syn.strip()
                     
                     # Dev codes
@@ -87,35 +85,11 @@ class DataEnrichment:
         
         return self.enriched_data
     
-    async def enrich_from_drugbank(self, client: httpx.AsyncClient, molecule: str) -> Dict:
-        """
-        DrugBank: Drug info, targets, pathways, companies
-        Nota: DrugBank público tem limitações, mas podemos tentar
-        """
-        logger.info(f"📊 ENRICHMENT: DrugBank for {molecule}")
-        
-        try:
-            # DrugBank search (público limitado, mas tentamos)
-            # Nota: A API completa requer chave, mas o site tem busca pública
-            search_url = f"https://go.drugbank.com/unearth/q?searcher=drugs&query={molecule}"
-            
-            # Por enquanto, vamos logar que tentamos
-            # Em produção, poderíamos fazer scraping do site público
-            logger.info(f"   ℹ️  DrugBank: Tentativa de busca em {search_url}")
-            
-        except Exception as e:
-            logger.warning(f"   ⚠️  DrugBank error: {e}")
-        
-        return self.enriched_data
-    
     async def enrich_from_openfda(self, client: httpx.AsyncClient, molecule: str, brand: str = None) -> Dict:
-        """
-        OpenFDA: Drug applications, sponsors/applicants, approval dates
-        """
+        """OpenFDA: Drug applications, sponsors/applicants, approval dates"""
         logger.info(f"📊 ENRICHMENT: OpenFDA for {molecule}")
         
         try:
-            # Search drug applications
             search_terms = [molecule]
             if brand:
                 search_terms.append(brand)
@@ -131,13 +105,11 @@ class DataEnrichment:
                     results = data.get("results", [])
                     
                     for result in results:
-                        # Extract companies/sponsors
                         sponsor = result.get("sponsor_name", "")
                         if sponsor and len(sponsor) < 100:
                             self.enriched_data["companies"].add(sponsor)
                             logger.info(f"   ✅ Company: {sponsor}")
                         
-                        # Extract brand/generic names
                         openfda = result.get("openfda", {})
                         for brand_name in openfda.get("brand_name", []):
                             if len(brand_name) < 100:
@@ -155,13 +127,10 @@ class DataEnrichment:
         return self.enriched_data
     
     async def enrich_from_pubmed(self, client: httpx.AsyncClient, molecule: str) -> Dict:
-        """
-        PubMed: Artigos científicos → termos relacionados, autores, instituições
-        """
+        """PubMed: Artigos científicos → termos relacionados, autores, instituições"""
         logger.info(f"📊 ENRICHMENT: PubMed for {molecule}")
         
         try:
-            # Search PubMed for articles
             response = await client.get(
                 f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={molecule}+patent&retmax=50&retmode=json",
                 timeout=30.0
@@ -173,9 +142,8 @@ class DataEnrichment:
                 
                 logger.info(f"   📊 PubMed: Found {len(id_list)} articles")
                 
-                # Fetch article details (limited to avoid timeout)
                 if id_list:
-                    ids_str = ",".join(id_list[:10])  # Primeiros 10
+                    ids_str = ",".join(id_list[:10])
                     
                     await asyncio.sleep(0.5)
                     response = await client.get(
@@ -190,79 +158,28 @@ class DataEnrichment:
                             if pmid == "uids":
                                 continue
                             
-                            # Extract authors
                             authors = article.get("authors", [])
                             for author in authors[:5]:
                                 author_name = author.get("name", "")
-                                # Pode ser nome de empresa/instituição
                                 if len(author_name) > 5 and len(author_name) < 100:
-                                    # Tentar identificar se é empresa
                                     if any(term in author_name.lower() for term in ["inc", "ltd", "corp", "pharma", "gmbh", "sa"]):
                                         self.enriched_data["companies"].add(author_name)
-                            
-                            # Extract MeSH terms (therapeutic terms)
-                            # Nota: Precisaria de outra API call, pulando por ora
         
         except Exception as e:
             logger.warning(f"   ⚠️  PubMed error: {e}")
         
         return self.enriched_data
     
-    async def run_all_enrichment(self, client: httpx.AsyncClient, molecule: str, brand: str = None) -> Dict:
-        """
-        Executa TODAS as fontes de enriquecimento em paralelo
-        """
-        logger.info(f"🔍 ENRICHMENT: Starting comprehensive data extraction for {molecule}")
-        
-        # Executar em paralelo para velocidade
-        await asyncio.gather(
-            self.enrich_from_pubchem(client, molecule),
-            self.enrich_from_openfda(client, molecule, brand),
-            self.enrich_from_pubmed(client, molecule),
-            # drugbank comentado por ora (requer autenticação)
-            # self.enrich_from_drugbank(client, molecule),
-            return_exceptions=True
-        )
-        
-        # Converter sets para lists
-        result = {
-            "synonyms": list(self.enriched_data["synonyms"])[:50],  # Top 50
-            "dev_codes": list(self.enriched_data["dev_codes"])[:20],  # Top 20
-            "cas_numbers": list(self.enriched_data["cas_numbers"]),
-            "companies": list(self.enriched_data["companies"])[:30],  # Top 30
-            "therapeutic_terms": list(self.enriched_data["therapeutic_terms"]),
-            "chemical_formulas": list(self.enriched_data["chemical_formulas"]),
-            "inchi": list(self.enriched_data["inchi"])[:5],
-            "smiles": list(self.enriched_data["smiles"])[:5],
-        }
-        
-        logger.info(f"✅ ENRICHMENT COMPLETE:")
-        logger.info(f"   - Synonyms: {len(result['synonyms'])}")
-        logger.info(f"   - Dev codes: {len(result['dev_codes'])}")
-        logger.info(f"   - CAS numbers: {len(result['cas_numbers'])}")
-        logger.info(f"   - Companies: {len(result['companies'])}")
-        logger.info(f"   - Chemical data: {len(result['chemical_formulas'])} formulas, {len(result['inchi'])} InChI, {len(result['smiles'])} SMILES")
-        
-        return result
-
-
-# Singleton
-data_enrichment = DataEnrichment()
-
     async def enrich_from_fda_orangebook(self, client: httpx.AsyncClient, molecule: str, brand: str = None) -> Dict:
-        """
-        FDA Orange Book: Approved drugs, applicants, patents
-        """
+        """FDA Orange Book: Approved drugs, applicants, patents"""
         logger.info(f"📊 ENRICHMENT: FDA Orange Book for {molecule}")
         
         try:
-            # Orange Book API (produtos aprovados)
             search_terms = [molecule]
             if brand:
                 search_terms.append(brand)
             
             for term in search_terms:
-                # Search by ingredient
                 response = await client.get(
                     f"https://api.fda.gov/drug/nda.json?search=products.active_ingredients.name:{term}&limit=100",
                     timeout=30.0
@@ -273,20 +190,17 @@ data_enrichment = DataEnrichment()
                     results = data.get("results", [])
                     
                     for result in results:
-                        # Extract sponsor/applicant
                         sponsor = result.get("sponsor_name", "")
                         if sponsor and len(sponsor) < 100:
                             self.enriched_data["companies"].add(sponsor)
                             logger.info(f"   ✅ Orange Book Company: {sponsor}")
                         
-                        # Extract product names
                         products = result.get("products", [])
                         for product in products:
                             brand_name = product.get("brand_name", "")
                             if brand_name and len(brand_name) < 100:
                                 self.enriched_data["synonyms"].add(brand_name)
                             
-                            # Extract active ingredients
                             active_ingredients = product.get("active_ingredients", [])
                             for ingredient in active_ingredients:
                                 ing_name = ingredient.get("name", "")
@@ -295,7 +209,6 @@ data_enrichment = DataEnrichment()
                 
                 await asyncio.sleep(0.5)
                 
-                # Search by brand name
                 if brand:
                     response = await client.get(
                         f"https://api.fda.gov/drug/nda.json?search=products.brand_name:{brand}&limit=100",
@@ -317,3 +230,39 @@ data_enrichment = DataEnrichment()
             logger.warning(f"   ⚠️  FDA Orange Book error: {e}")
         
         return self.enriched_data
+    
+    async def run_all_enrichment(self, client: httpx.AsyncClient, molecule: str, brand: str = None) -> Dict:
+        """Executa TODAS as fontes de enriquecimento em paralelo"""
+        logger.info(f"🔍 ENRICHMENT: Starting comprehensive data extraction for {molecule}")
+        
+        await asyncio.gather(
+            self.enrich_from_pubchem(client, molecule),
+            self.enrich_from_openfda(client, molecule, brand),
+            self.enrich_from_pubmed(client, molecule),
+            self.enrich_from_fda_orangebook(client, molecule, brand),
+            return_exceptions=True
+        )
+        
+        result = {
+            "synonyms": list(self.enriched_data["synonyms"])[:50],
+            "dev_codes": list(self.enriched_data["dev_codes"])[:20],
+            "cas_numbers": list(self.enriched_data["cas_numbers"]),
+            "companies": list(self.enriched_data["companies"])[:30],
+            "therapeutic_terms": list(self.enriched_data["therapeutic_terms"]),
+            "chemical_formulas": list(self.enriched_data["chemical_formulas"]),
+            "inchi": list(self.enriched_data["inchi"])[:5],
+            "smiles": list(self.enriched_data["smiles"])[:5],
+        }
+        
+        logger.info(f"✅ ENRICHMENT COMPLETE:")
+        logger.info(f"   - Synonyms: {len(result['synonyms'])}")
+        logger.info(f"   - Dev codes: {len(result['dev_codes'])}")
+        logger.info(f"   - CAS numbers: {len(result['cas_numbers'])}")
+        logger.info(f"   - Companies: {len(result['companies'])}")
+        logger.info(f"   - Chemical data: {len(result['chemical_formulas'])} formulas, {len(result['inchi'])} InChI, {len(result['smiles'])} SMILES")
+        
+        return result
+
+
+# Singleton
+data_enrichment = DataEnrichment()
