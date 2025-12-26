@@ -8,7 +8,7 @@ Layer 2: Google Patents (Dynamic with enriched data)
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
 import httpx
 import base64
 import asyncio
