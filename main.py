@@ -118,17 +118,3 @@ async def search_patents(request: SearchRequest):
             status_code=500,
             detail=f"Search error: {str(e)}"
         )
-
-
-if __name__ == "__main__":
-    import uvicorn
-    
-    port = int(os.getenv("PORT", 8080))
-    
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        workers=1,
-        log_level="info"
-    )
