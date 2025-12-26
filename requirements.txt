@@ -10,18 +10,14 @@ playwright-stealth==1.0.6
 # HTTP & Async
 httpx==0.27.0
 aiohttp==3.10.0
+requests==2.32.3
 
 # Parsing
 beautifulsoup4==4.12.3
 lxml==5.1.0
-
-# EPO OPS (existing layer)
-requests==2.32.3
-python-epo-ops-client==3.5.0
 
 # PubChem
 pubchempy==1.0.4
 
 # Utils
 python-dateutil==2.9.0
-python-dotenv==1.0.1
