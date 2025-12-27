@@ -1,25 +1,27 @@
 """
-Pharmyrus v27.4 - Robust Abstract & IPC Parse
+Pharmyrus v27.5 - Google Patents Metadata Fallback
 Layer 1: EPO OPS (COMPLETO do v26 - TODAS funções + METADATA FULL)
-Layer 2: Google Patents (AGRESSIVO - todas variações)
+Layer 2: Google Patents (AGRESSIVO - todas variações + METADATA FALLBACK)
 
-NEW v27.4:
+NEW v27.5:
+- Google Patents HTML parsing para campos vazios após EPO
+- Fallback para abstract, applicants, inventors, IPC codes
+- Deduplicação: EPO prioritário, Google preenche gaps
+- Regex robusto para HTML de patents.google.com
+- ~99%+ metadata coverage esperado
+
+PREVIOUS v27.4:
 - Parse ROBUSTO de abstracts: múltiplos formatos, lista/dict, múltiplos parágrafos
 - Parse ROBUSTO de IPC codes: 3 formatos diferentes, múltiplos fallbacks
 - Aplicado tanto em get_family_patents quanto em enrich_br_metadata
 - ~95%+ abstract coverage, ~95%+ IPC coverage
 
-PREVIOUS v27.3:
-- Enriquecimento individual de BRs via /published-data/publication/docdb/{BR}/biblio
-- Busca metadata completa para BRs que vieram vazios da família
-- 100% metadata coverage para todos BRs encontrados
-
 METADATA PARSING COMPLETO:
 - Title (EN + Original) ✅
-- Abstract (robust multi-format parse + individual enrichment) ✅✅
-- Applicants (até 10) ✅
-- Inventors (até 10) ✅
-- IPC Codes (robust multi-format parse, até 10) ✅✅
+- Abstract (robust EPO parse + Google fallback) ✅✅✅
+- Applicants (EPO + Google fallback, até 10) ✅✅
+- Inventors (EPO + Google fallback, até 10) ✅✅
+- IPC Codes (robust EPO parse + Google fallback, até 10) ✅✅✅
 - Publication Date (ISO 8601) ✅
 - Filing Date (ISO 8601) ✅
 - Priority Date (ISO 8601) ✅
@@ -67,9 +69,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v27.4",
-    description="Two-Layer Patent Search: EPO OPS (FULL + ROBUST METADATA PARSE + INDIVIDUAL BR ENRICHMENT) + Google Patents (AGGRESSIVE)",
-    version="27.4"
+    title="Pharmyrus v27.5",
+    description="Two-Layer Patent Search: EPO OPS (FULL + ROBUST PARSE + BR ENRICHMENT) + Google Patents (AGGRESSIVE + METADATA FALLBACK)",
+    version="27.5"
 )
 
 app.add_middleware(
@@ -807,13 +809,94 @@ async def enrich_br_metadata(client: httpx.AsyncClient, token: str, patent_data:
     return patent_data
 
 
+async def enrich_from_google_patents(client: httpx.AsyncClient, patent_data: Dict) -> Dict:
+    """Fallback: Enriquece metadata via Google Patents para campos ainda vazios"""
+    br_number = patent_data["patent_number"]
+    
+    # Se já tem tudo, não precisa buscar
+    if (patent_data.get("abstract") and 
+        patent_data.get("applicants") and 
+        patent_data.get("inventors") and 
+        patent_data.get("ipc_codes")):
+        return patent_data
+    
+    try:
+        url = f"https://patents.google.com/patent/{br_number}/en"
+        response = await client.get(url, timeout=15.0, follow_redirects=True)
+        
+        if response.status_code != 200:
+            return patent_data
+        
+        html = response.text
+        
+        # Parse ABSTRACT se estiver vazio
+        if not patent_data.get("abstract"):
+            # Google Patents: <div class="abstract">
+            import re
+            abstract_match = re.search(r'<div[^>]*class="[^"]*abstract[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL | re.IGNORECASE)
+            if abstract_match:
+                abstract_html = abstract_match.group(1)
+                # Limpar HTML tags
+                abstract_text = re.sub(r'<[^>]+>', '', abstract_html)
+                # Limpar whitespace
+                abstract_text = ' '.join(abstract_text.split())
+                if abstract_text and len(abstract_text) > 20:  # Mínimo 20 chars
+                    patent_data["abstract"] = abstract_text[:2000]  # Max 2000 chars
+        
+        # Parse APPLICANTS se estiver vazio
+        if not patent_data.get("applicants"):
+            # Google Patents: <dd itemprop="applicantName">
+            applicants = re.findall(r'<dd[^>]*itemprop="applicantName"[^>]*>(.*?)</dd>', html, re.DOTALL)
+            if applicants:
+                clean_applicants = []
+                for app in applicants[:10]:
+                    app_text = re.sub(r'<[^>]+>', '', app).strip()
+                    if app_text:
+                        clean_applicants.append(app_text)
+                if clean_applicants:
+                    patent_data["applicants"] = clean_applicants
+        
+        # Parse INVENTORS se estiver vazio
+        if not patent_data.get("inventors"):
+            # Google Patents: <dd itemprop="inventorName">
+            inventors = re.findall(r'<dd[^>]*itemprop="inventorName"[^>]*>(.*?)</dd>', html, re.DOTALL)
+            if inventors:
+                clean_inventors = []
+                for inv in inventors[:10]:
+                    inv_text = re.sub(r'<[^>]+>', '', inv).strip()
+                    if inv_text:
+                        clean_inventors.append(inv_text)
+                if clean_inventors:
+                    patent_data["inventors"] = clean_inventors
+        
+        # Parse IPC CODES se estiver vazio
+        if not patent_data.get("ipc_codes"):
+            # Google Patents: <span itemprop="Classifi­cation">
+            ipc_matches = re.findall(r'<span[^>]*itemprop="Classifi[^"]*cation"[^>]*>(.*?)</span>', html, re.DOTALL)
+            if ipc_matches:
+                ipc_codes = []
+                for ipc in ipc_matches[:10]:
+                    ipc_text = re.sub(r'<[^>]+>', '', ipc).strip()
+                    if ipc_text and len(ipc_text) >= 4:
+                        ipc_codes.append(ipc_text)
+                if ipc_codes:
+                    patent_data["ipc_codes"] = ipc_codes
+        
+        await asyncio.sleep(0.2)  # Rate limiting Google
+        
+    except Exception as e:
+        logger.debug(f"Error fetching Google Patents for {br_number}: {e}")
+    
+    return patent_data
+
+
 # ============= ENDPOINTS =============
 
 @app.get("/")
 async def root():
     return {
         "message": "Pharmyrus v27.4 - Robust Abstract & IPC Parse (PRODUCTION)", 
-        "version": "27.4",
+        "version": "27.5",
         "layers": ["EPO OPS (FULL v26 + METADATA)", "Google Patents (AGGRESSIVE)"],
         "metadata_fields": ["title", "abstract", "applicants", "inventors", "ipc_codes", "filing_date", "priority_date"],
         "features": ["Multiple BR per WO", "Individual BR enrichment", "Robust abstract/IPC parse"]
@@ -822,7 +905,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "27.4"}
+    return {"status": "healthy", "version": "27.5"}
 
 
 @app.get("/countries")
@@ -847,7 +930,7 @@ async def search_patents(request: SearchRequest):
     if not target_countries:
         target_countries = ["BR"]
     
-    logger.info(f"🚀 Search v27.4 started: {molecule} | Countries: {target_countries}")
+    logger.info(f"🚀 Search v27.5 started: {molecule} | Countries: {target_countries}")
     
     async with httpx.AsyncClient() as client:
         # ===== LAYER 1: EPO (CÓDIGO COMPLETO v26) =====
@@ -951,6 +1034,26 @@ async def search_patents(request: SearchRequest):
         
         logger.info(f"   ✅ BR enrichment complete")
         
+        # FALLBACK: Google Patents para BRs com metadata ainda incompleta
+        logger.info(f"🌐 Google Patents fallback for missing metadata...")
+        still_incomplete = [
+            p for p in br_patents 
+            if not p.get("abstract") or not p.get("applicants") or not p.get("inventors") or not p.get("ipc_codes")
+        ]
+        
+        if still_incomplete:
+            logger.info(f"   Found {len(still_incomplete)} BRs still incomplete after EPO")
+            for i, patent in enumerate(still_incomplete):
+                enriched = await enrich_from_google_patents(client, patent)
+                patent.update(enriched)
+                
+                if (i + 1) % 10 == 0:
+                    logger.info(f"   Google enriched {i + 1}/{len(still_incomplete)} BRs...")
+            
+            logger.info(f"   ✅ Google Patents fallback complete")
+        else:
+            logger.info(f"   ✅ All BRs complete from EPO, skipping Google fallback")
+        
         # Buscar abstracts para patentes que não têm
         logger.info(f"   Fetching abstracts for patents without abstract...")
         patents_without_abstract = [p for p in all_patents if p.get("abstract") is None]
@@ -975,7 +1078,7 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v27.4 (Robust Parse)",
+                "version": "Pharmyrus v27.5 (Google Fallback)",
                 "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)"]
             },
             "summary": {
