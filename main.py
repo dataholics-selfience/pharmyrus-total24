@@ -1100,6 +1100,7 @@ async def search_patents(request: SearchRequest):
             molecule=molecule,
             brand=brand,
             dev_codes=pubchem["dev_codes"],
+            known_wos=sorted(list(all_wos))[:20],  # Top 20 WOs para mapear BRs
             groq_api_key=os.getenv("GROQ_API_KEY")
         )
         

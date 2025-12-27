@@ -22,7 +22,7 @@ class INPICrawler:
         
     async def translate_to_portuguese(self, molecule_name: str, groq_api_key: Optional[str] = None) -> str:
         """
-        Traduz nome da molécula para português usando Groq AI (gratuito)
+        Traduz nome da molécula para português usando Grok X.AI (gratuito)
         Exemplos: Darolutamide → Darolutamida, Ixazomib → Ixazomibe
         """
         if not groq_api_key:
@@ -35,25 +35,25 @@ class INPICrawler:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
+                    "https://api.x.ai/v1/chat/completions",  # ✅ CORRIGIDO: Grok X.AI
                     headers={
                         "Authorization": f"Bearer {groq_api_key}",
                         "Content-Type": "application/json"
                     },
                     json={
-                        "model": "llama-3.3-70b-versatile",
+                        "model": "grok-beta",  # ✅ CORRIGIDO: Grok model
                         "messages": [
                             {
                                 "role": "system",
-                                "content": "You are a pharmaceutical terminology expert. Translate drug molecule names from English to Brazilian Portuguese. Return ONLY the translated name, nothing else. Examples: Darolutamide→Darolutamida, Ixazomib→Ixazomibe, Olaparib→Olaparibe"
+                                "content": "You are a pharmaceutical terminology expert. Translate drug molecule names from English to Brazilian Portuguese. Return ONLY the translated name, nothing else. Examples: Darolutamide→Darolutamida, Ixazomib→Ixazomibe, Olaparib→Olaparibe, Trastuzumab→Trastuzumabe"
                             },
                             {
                                 "role": "user",
                                 "content": f"Translate to Portuguese: {molecule_name}"
                             }
                         ],
-                        "temperature": 0.1,
-                        "max_tokens": 50
+                        "temperature": 0,
+                        "stream": false
                     }
                 )
                 
@@ -61,15 +61,15 @@ class INPICrawler:
                     data = response.json()
                     translated = data["choices"][0]["message"]["content"].strip()
                     # Limpar possíveis quotes ou markdown
-                    translated = translated.replace('"', '').replace("'", "").strip()
-                    print(f"   ✅ Groq translated: {molecule_name} → {translated}")
+                    translated = translated.replace('"', '').replace("'", "").replace('`', '').strip()
+                    print(f"   ✅ Grok translated: {molecule_name} → {translated}")
                     return translated
                 else:
-                    print(f"   ⚠️  Groq API error {response.status_code}, using original name")
+                    print(f"   ⚠️  Grok API error {response.status_code}: {response.text[:100]}")
                     return molecule_name
         
         except Exception as e:
-            print(f"   ⚠️  Groq translation failed: {e}, using original name")
+            print(f"   ⚠️  Grok translation failed: {e}, using original name")
             return molecule_name
     
     async def search_inpi(
@@ -77,6 +77,7 @@ class INPICrawler:
         molecule: str,
         brand: Optional[str] = None,
         dev_codes: List[str] = None,
+        known_wos: List[str] = None,
         groq_api_key: Optional[str] = None
     ) -> List[Dict]:
         """
@@ -88,27 +89,50 @@ class INPICrawler:
         # Traduzir para português
         molecule_pt = await self.translate_to_portuguese(molecule, groq_api_key)
         
-        # Construir termos de busca
-        search_terms = [molecule_pt]
+        # Construir termos de busca COMPLETOS
+        search_terms = []
         
+        # 1. Molécula em português (PRIORITÁRIO)
+        search_terms.append(molecule_pt)
+        search_terms.append(molecule)  # Fallback EN
+        
+        # 2. Brand name em português
         if brand:
             brand_pt = await self.translate_to_portuguese(brand, groq_api_key)
             search_terms.append(brand_pt)
+            search_terms.append(brand)
         
-        # Dev codes não precisam tradução
+        # 3. Dev codes (não precisam tradução)
         if dev_codes:
-            search_terms.extend(dev_codes[:3])
+            search_terms.extend(dev_codes[:5])  # Top 5 dev codes
         
-        # Adicionar variações químicas em português
-        chemical_variants = [
+        # 4. WOs conhecidos para mapear BRs
+        if known_wos:
+            # Pegar top 10 WOs mais relevantes
+            for wo in known_wos[:10]:
+                search_terms.append(wo)
+        
+        # 5. Variações químicas em português
+        chemical_variants_pt = [
             f"{molecule_pt} sal",
             f"{molecule_pt} composto",
-            f"{molecule_pt} cristal",
-            f"{molecule_pt} farmaceutic"
+            f"{molecule_pt} derivado",
+            f"{molecule_pt} farmaceutico",
+            f"{molecule_pt} tratamento",
+            f"antagonista {molecule_pt}",
+            f"inibidor {molecule_pt}"
         ]
-        search_terms.extend(chemical_variants)
+        search_terms.extend(chemical_variants_pt)
         
-        print(f"   📊 INPI search terms: {len(search_terms)}")
+        # 6. Variações em inglês (fallback)
+        chemical_variants_en = [
+            f"{molecule} salt",
+            f"{molecule} compound",
+            f"{molecule} pharmaceutical"
+        ]
+        search_terms.extend(chemical_variants_en)
+        
+        print(f"   📊 INPI search terms: {len(search_terms)} ({search_terms[:10]}...)")
         
         all_patents = []
         
@@ -130,10 +154,10 @@ class INPICrawler:
                 
                 page = await context.new_page()
                 
-                # Buscar com os primeiros 5 termos
-                for i, term in enumerate(search_terms[:5]):
+                # Buscar com os primeiros 15 termos (ao invés de 5)
+                for i, term in enumerate(search_terms[:15]):
                     try:
-                        print(f"   🔍 INPI search {i+1}/5: {term}")
+                        print(f"   🔍 INPI search {i+1}/15: {term}")
                         
                         # Ir para página de busca
                         await page.goto(self.base_url, wait_until='domcontentloaded', timeout=30000)
