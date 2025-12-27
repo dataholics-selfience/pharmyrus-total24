@@ -6,12 +6,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
+# Copy application
 COPY main.py .
-COPY enhanced_data_enrichment.py .
-COPY professional_query_builder.py .
 COPY google_patents_crawler.py .
-COPY search_state.py .
 
 # Railway uses PORT env variable
 ENV PORT=8000

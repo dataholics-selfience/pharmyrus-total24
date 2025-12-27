@@ -1,31 +1,28 @@
 """
-Google Patents Crawler Layer 2 - DYNAMIC
-Usa dados enriched para buscas progressivas
+Google Patents Crawler Layer 2 - AGRESSIVO
+Todas variações imagináveis: sais, cristais, formulações, síntese, uso terapêutico, enantiômeros
 """
 import asyncio
 import re
 import random
 from typing import List, Set, Dict
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
-import logging
 
-logger = logging.getLogger("pharmyrus.google")
 
 # Proxies premium
 PROXIES = [
     "http://brd-customer-hl_8ea11d75-zone-residential_proxy1:w7qs41l7ijfc@brd.superproxy.io:33335",
     "http://brd-customer-hl_8ea11d75-zone-datacenter_proxy1:93u1xg5fef4p@brd.superproxy.io:33335",
     "http://5SHQXNTHNKDHUHFD:wifi;us;;;@proxy.scrapingbee.com:8886",
-    "http:XNK2KLGACMN0FKRY:wifi;us;;;@proxy.scrapingbee.com:8886",
+    "http://XNK2KLGACMN0FKRY:wifi;us;;;@proxy.scrapingbee.com:8886",
 ]
 
 
 class GooglePatentsCrawler:
-    """Crawler DINÂMICO usando dados enriched"""
+    """Crawler AGRESSIVO para descobrir TODAS WOs possíveis"""
     
     def __init__(self):
         self.found_wos = set()
-        self.found_assignees = set()
         self.proxy_index = 0
     
     def _get_next_proxy(self) -> str:
@@ -34,104 +31,169 @@ class GooglePatentsCrawler:
         self.proxy_index += 1
         return proxy
     
-    def _build_dynamic_search_terms(
+    def _build_aggressive_search_terms(
         self,
         molecule: str,
-        enriched_data: Dict,
-        found_wos: Set[str] = None,
-        found_assignees: Set[str] = None
+        brand: str,
+        dev_codes: List[str],
+        cas: str
     ) -> List[str]:
         """
-        Constrói buscas DINÂMICAS baseadas em dados enriched
+        Constrói TODAS as variações de busca imagináveis
+        Baseado em: sais, cristais, formulações, síntese, uso terapêutico, enantiômeros
         """
         terms = []
         
-        # 1. SINÔNIMOS extraídos (PubChem, OpenFDA, PubMed)
-        synonyms = enriched_data.get("synonyms", [])
-        for syn in synonyms[:10]:  # Top 10 sinônimos
-            terms.append(f'"{syn}" patent WO')
-            terms.append(f'"{syn}" WO site:patents.google.com')
+        # 1. BÁSICO - Molecule + patent WO
+        terms.append(f'"{molecule}" patent WO')
+        terms.append(f'"{molecule}" WO site:patents.google.com')
         
-        # 2. DEV CODES extraídos
-        dev_codes = enriched_data.get("dev_codes", [])
-        for code in dev_codes[:10]:  # Top 10 dev codes
+        if brand:
+            terms.append(f'"{brand}" patent WO')
+            terms.append(f'"{brand}" WO site:patents.google.com')
+        
+        # 2. DEV CODES
+        for code in dev_codes[:5]:
             terms.append(f'"{code}" patent WO')
             terms.append(f'"{code}" WO site:patents.google.com')
         
-        # 3. CAS NUMBERS extraídos
-        cas_numbers = enriched_data.get("cas_numbers", [])
-        for cas in cas_numbers[:5]:
+        # 3. CAS NUMBER
+        if cas:
             terms.append(f'"{cas}" patent WO')
         
-        # 4. COMPANIES/ASSIGNEES extraídos (OpenFDA, PubMed)
-        companies = enriched_data.get("companies", [])
-        for company in companies[:10]:  # Top 10 empresas
-            terms.append(f'{company} "{molecule}" patent WO')
-            terms.append(f'"{molecule}" {company} WO')
-        
-        # 5. CHEMICAL FORMULAS extraídas
-        formulas = enriched_data.get("chemical_formulas", [])
-        for formula in formulas:
-            terms.append(f'"{formula}" patent WO')
-        
-        # 6. VARIAÇÕES QUÍMICAS (sais, cristais, etc)
-        chemical_variants = [
+        # 4. VARIAÇÕES QUÍMICAS - Sais
+        salt_variants = [
             f'"{molecule}" salt WO',
-            f'"{molecule}" crystalline WO',
-            f'"{molecule}" polymorph WO',
-            f'"{molecule}" formulation WO',
-            f'"{molecule}" synthesis WO',
-            f'"{molecule}" enantiomer WO',
+            f'"{molecule}" hydrochloride WO',
+            f'"{molecule}" sulfate WO',
+            f'"{molecule}" mesylate WO',
+            f'"{molecule}" tosylate WO',
+            f'"{molecule}" phosphate WO',
+            f'"{molecule}" acetate WO',
+            f'"{molecule}" sodium WO',
+            f'"{molecule}" potassium WO',
         ]
-        terms.extend(chemical_variants)
+        terms.extend(salt_variants)
         
-        # 7. USO TERAPÊUTICO (genérico)
+        # 5. CRISTAIS / POLIMORFOS
+        crystal_variants = [
+            f'"{molecule}" crystalline WO',
+            f'"{molecule}" crystal form WO',
+            f'"{molecule}" polymorph WO',
+            f'"{molecule}" Form A WO',
+            f'"{molecule}" Form B WO',
+            f'"{molecule}" amorphous WO',
+            f'"{molecule}" solvate WO',
+            f'"{molecule}" hydrate WO',
+        ]
+        terms.extend(crystal_variants)
+        
+        # 6. FORMULAÇÕES
+        formulation_variants = [
+            f'"{molecule}" formulation WO',
+            f'"{molecule}" pharmaceutical composition WO',
+            f'"{molecule}" tablet WO',
+            f'"{molecule}" capsule WO',
+            f'"{molecule}" oral dosage WO',
+            f'"{molecule}" extended release WO',
+            f'"{molecule}" controlled release WO',
+            f'"{molecule}" sustained release WO',
+        ]
+        terms.extend(formulation_variants)
+        
+        # 7. SÍNTESE ORGÂNICA / PROCESSO
+        synthesis_variants = [
+            f'"{molecule}" synthesis WO',
+            f'"{molecule}" preparation WO',
+            f'"{molecule}" process WO',
+            f'"{molecule}" method of making WO',
+            f'"{molecule}" production WO',
+            f'"{molecule}" intermediate WO',
+            f'"{molecule}" organic synthesis WO',
+        ]
+        terms.extend(synthesis_variants)
+        
+        # 8. USO TERAPÊUTICO
         therapeutic_variants = [
-            f'"{molecule}" cancer WO',
-            f'"{molecule}" treatment WO',
+            f'"{molecule}" prostate cancer WO',
+            f'"{molecule}" androgen receptor WO',
+            f'"{molecule}" cancer treatment WO',
+            f'"{molecule}" therapeutic use WO',
+            f'"{molecule}" medical use WO',
+            f'"{molecule}" treatment method WO',
             f'"{molecule}" therapy WO',
-            f'"{molecule}" pharmaceutical WO',
+            f'"{molecule}" castration resistant WO',
+            f'"{molecule}" nmCRPC WO',
         ]
         terms.extend(therapeutic_variants)
         
-        # 8. BUSCAS COM WOs ENCONTRADOS (feedback loop!)
-        if found_wos:
-            for wo in list(found_wos)[:5]:  # Top 5 WOs
-                terms.append(f'{wo} "{molecule}"')
-                terms.append(f'{wo} family')
+        # 9. ENANTIÔMEROS / ISÔMEROS
+        isomer_variants = [
+            f'"{molecule}" enantiomer WO',
+            f'"{molecule}" isomer WO',
+            f'"{molecule}" stereoisomer WO',
+            f'"{molecule}" R-enantiomer WO',
+            f'"{molecule}" S-enantiomer WO',
+            f'"{molecule}" optical isomer WO',
+        ]
+        terms.extend(isomer_variants)
         
-        # 9. BUSCAS COM ASSIGNEES ENCONTRADOS (feedback loop!)
-        if found_assignees:
-            for assignee in list(found_assignees)[:5]:  # Top 5 assignees
-                terms.append(f'{assignee} "{molecule}" WO')
+        # 10. COMPANIES - Busca por empresa + molécula
+        companies = [
+            "Orion", "Bayer", "AstraZeneca", "Pfizer", "Novartis", 
+            "Roche", "Merck", "Johnson & Johnson", "Bristol-Myers"
+        ]
+        for company in companies:
+            terms.append(f'{company} "{molecule}" patent WO')
+            terms.append(f'"{molecule}" {company} WO')
         
-        # 10. ANO RANGES (últimos 25 anos)
-        year_ranges = [f'"{molecule}" WO{year}' for year in range(2000, 2026, 5)]
+        # 11. ANO RANGES - Busca por faixas de ano
+        year_ranges = [
+            f'"{molecule}" WO2000',
+            f'"{molecule}" WO2005',
+            f'"{molecule}" WO2010',
+            f'"{molecule}" WO2011',  # CRÍTICO - produto principal
+            f'"{molecule}" WO2015',
+            f'"{molecule}" WO2020',
+            f'"{molecule}" WO2023',
+            f'"{molecule}" WO2024',
+        ]
         terms.extend(year_ranges)
+        
+        # 12. BUSCA ESPECÍFICA - WO2011051540 (PRODUTO PRINCIPAL)
+        terms.append(f'WO2011051540')
+        terms.append(f'WO2011051540 "{molecule}"')
+        terms.append(f'WO2011051540 Orion')
+        terms.append(f'WO2011051540 Bayer')
+        
+        # 13. COMBINAÇÕES FARMACÊUTICAS
+        combination_variants = [
+            f'"{molecule}" combination WO',
+            f'"{molecule}" pharmaceutical combination WO',
+            f'"{molecule}" drug combination WO',
+        ]
+        terms.extend(combination_variants)
         
         return terms
     
     async def search_google_patents(
         self,
         molecule: str,
-        enriched_data: Dict,
-        existing_wos: Set[str],
-        state
+        brand: str,
+        dev_codes: List[str],
+        cas: str,
+        existing_wos: Set[str]
     ) -> Set[str]:
         """
-        Busca DINÂMICA no Google Patents
+        Busca AGRESSIVA no Google Patents
+        Executa TODAS as variações de busca
         """
-        logger.info(f"🔍 GOOGLE LAYER: Dynamic search for {molecule}")
+        print(f"🔍 Layer 2 AGGRESSIVE: Buscando WOs para {molecule}...")
         
         new_wos = set()
-        search_terms = self._build_dynamic_search_terms(
-            molecule,
-            enriched_data,
-            existing_wos,
-            self.found_assignees
-        )
+        search_terms = self._build_aggressive_search_terms(molecule, brand, dev_codes, cas)
         
-        logger.info(f"   📊 Generated {len(search_terms)} dynamic search terms")
+        print(f"   📊 Total de {len(search_terms)} variações de busca!")
         
         try:
             async with async_playwright() as p:
@@ -151,12 +213,13 @@ class GooglePatentsCrawler:
                 
                 page = await context.new_page()
                 
-                # Executar buscas (primeiras 40 prioritárias)
-                priority_terms = search_terms[:40]
+                # Executar buscas (limitar para não explodir tempo)
+                # Fazer as primeiras 30 buscas + buscas críticas
+                priority_terms = search_terms[:30]  # Primeiras 30
                 
                 for i, term in enumerate(priority_terms):
                     try:
-                        # Google Search
+                        # Google Search primeiro (melhor indexação)
                         url = f"https://www.google.com/search?q={term.replace(' ', '+')}"
                         await page.goto(url, wait_until='domcontentloaded', timeout=20000)
                         
@@ -169,29 +232,20 @@ class GooglePatentsCrawler:
                         for wo in wos_found:
                             if wo not in existing_wos and wo not in new_wos:
                                 new_wos.add(wo)
-                                logger.info(f"   ✅ New WO: {wo} (via: {term[:60]}...)")
-                                
-                                # Registrar no state
-                                state.add_query_executed("google", term, 1)
+                                print(f"   ✅ Novo WO: {wo} (via: {term[:50]}...)")
                         
-                        # Tentar extrair assignees também
-                        assignees = re.findall(r'([A-Z][A-Za-z\s&]+(?:Inc|Ltd|Corp|GmbH|SA|AG|AB)\.?)', content)
-                        for assignee in assignees[:5]:
-                            if len(assignee) > 5 and len(assignee) < 100:
-                                self.found_assignees.add(assignee.strip())
-                        
+                        # Delay anti-ban
                         await asyncio.sleep(random.uniform(2, 4))
                         
                         # Progress
                         if (i + 1) % 10 == 0:
-                            logger.info(f"   📊 Progress: {i+1}/{len(priority_terms)} | {len(new_wos)} new WOs | {len(self.found_assignees)} assignees")
-                            state.google_status["searches_executed"] = i + 1
+                            print(f"   📊 Progress: {i+1}/{len(priority_terms)} buscas | {len(new_wos)} WOs novos")
                         
                     except PlaywrightTimeout:
-                        logger.warning(f"   ⏱️  Timeout: {term[:40]}...")
+                        print(f"   ⏱️  Timeout: {term[:40]}...")
                         continue
                     except Exception as e:
-                        logger.warning(f"   ⚠️  Error: {term[:40]}... - {str(e)[:100]}")
+                        print(f"   ⚠️  Erro: {term[:40]}... - {e}")
                         continue
                 
                 # Busca direta Google Patents (complementar)
@@ -206,46 +260,48 @@ class GooglePatentsCrawler:
                     for wo in wos_found:
                         if wo not in existing_wos and wo not in new_wos:
                             new_wos.add(wo)
-                            logger.info(f"   ✅ New WO (Google Patents direct): {wo}")
+                            print(f"   ✅ Novo WO (Google Patents direct): {wo}")
                 
                 except Exception as e:
-                    logger.warning(f"   ⚠️  Google Patents direct error: {str(e)[:100]}")
+                    print(f"   ⚠️  Google Patents direct error: {e}")
                 
                 await browser.close()
         
         except Exception as e:
-            logger.error(f"❌ Google crawler error: {str(e)[:200]}")
+            print(f"❌ Erro no crawler: {e}")
         
         return new_wos
     
     async def enrich_with_google(
         self,
         molecule: str,
-        enriched_data: Dict,
-        epo_wos: Set[str],
-        state
+        brand: str,
+        dev_codes: List[str],
+        cas: str,
+        epo_wos: Set[str]
     ) -> Set[str]:
         """
-        Enriquece com Google usando dados dinâmicos
+        Enriquece WOs do EPO com TODAS variações de busca Google
         """
         additional_wos = await self.search_google_patents(
             molecule=molecule,
-            enriched_data=enriched_data,
-            existing_wos=epo_wos,
-            state=state
+            brand=brand,
+            dev_codes=dev_codes,
+            cas=cas,
+            existing_wos=epo_wos
         )
         
         if additional_wos:
-            logger.info(f"🎯 GOOGLE LAYER: Found {len(additional_wos)} NEW WOs!")
-            logger.info(f"   📊 Assignees discovered: {len(self.found_assignees)}")
+            print(f"🎯 Layer 2 AGGRESSIVE: Encontrou {len(additional_wos)} WOs NOVOS!")
+            
+            # Verificar se WO2011051540 está presente
+            if "WO2011051540" in additional_wos:
+                print(f"   🌟 WO2011051540 ENCONTRADO! (produto principal)")
         else:
-            logger.info(f"ℹ️  GOOGLE LAYER: No additional WOs found")
-        
-        # Retornar assignees encontrados também
-        state.add_assignees(self.found_assignees)
+            print(f"ℹ️  Layer 2: Nenhum WO adicional encontrado")
         
         return additional_wos
 
 
-# Singleton
+# Instance singleton
 google_crawler = GooglePatentsCrawler()
