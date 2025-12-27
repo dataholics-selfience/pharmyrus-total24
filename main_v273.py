@@ -1,7 +1,9 @@
 """
-Pharmyrus v27.4 DYNAMIC - 100% AGNÓSTICO
-NADA é fixo - TUDO vem do enrichment!
-Funciona para QUALQUER molécula: darolutamide, paracetamol, niraparib, etc
+Pharmyrus v27.3 HYBRID SUPREME
+Base: v26 proven queries (173 WOs)
++ Dynamic queries (Cortellis-inspired)
++ Fixed priority/citation search
++ Filtered enrichment
 """
 
 from fastapi import FastAPI, HTTPException
@@ -16,10 +18,10 @@ import logging
 from datetime import datetime
 
 # Import custom modules
-from data_enrichment import DataEnrichment
-from google_patents_crawler import GooglePatentsCrawler
+from data_enrichment import data_enrichment
+from google_patents_crawler import google_crawler
 from search_state import SearchState
-from dynamic_query_builder import DynamicQueryBuilder
+from expert_query_builder import ExpertQueryBuilder
 
 # Logging
 logging.basicConfig(
@@ -41,9 +43,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v27.4 DYNAMIC",
-    description="100% Agnóstico - Funciona para QUALQUER molécula",
-    version="27.4"
+    title="Pharmyrus v27.3 HYBRID",
+    description="Patent Search with Cortellis-inspired strategy",
+    version="27.3"
 )
 
 app.add_middleware(
@@ -60,6 +62,54 @@ class SearchRequest(BaseModel):
     paises_alvo: List[str] = Field(default=["BR"])
     incluir_wo: bool = True
     max_results: int = 100
+
+
+# ============= ENRICHMENT FILTER =============
+
+def filter_synonyms_for_epo(synonyms: List[str]) -> List[str]:
+    """Filtra sinônimos para EPO - só os que funcionam"""
+    filtered = []
+    for syn in synonyms:
+        # Skip se muito longo
+        if len(syn) > 30:
+            continue
+        # Skip se tem parentheses (ex: "Darolutamide (JAN/USAN)")
+        if "(" in syn or ")" in syn:
+            continue
+        # Skip se tem barra
+        if "/" in syn:
+            continue
+        # OK!
+        filtered.append(syn)
+    return filtered[:10]  # Top 10
+
+
+def filter_dev_codes_for_epo(dev_codes: List[str]) -> List[str]:
+    """Filtra dev codes - só padrões válidos"""
+    filtered = []
+    for code in dev_codes:
+        # Padrão: XX-12345 ou XX12345
+        if re.match(r'^[A-Z]{2,5}-?\d{3,7}[A-Z]?$', code, re.I):
+            filtered.append(code)
+            # Adicionar versão sem hífen
+            code_no_hyphen = code.replace("-", "")
+            if code_no_hyphen != code:
+                filtered.append(code_no_hyphen)
+    return filtered[:15]  # Top 15
+
+
+def filter_companies_for_epo(companies: List[str]) -> List[str]:
+    """Filtra companies - só empresas reais"""
+    filtered = []
+    for company in companies:
+        # Skip se muito longo
+        if len(company) > 50:
+            continue
+        # Deve ter indicador de empresa
+        company_lower = company.lower()
+        if any(x in company_lower for x in ["pharma", "inc", "ltd", "corp", "gmbh", "sa", "ag", "ab", "llc"]):
+            filtered.append(company)
+    return filtered[:10]  # Top 10
 
 
 # ============= EPO FUNCTIONS =============
@@ -83,6 +133,87 @@ async def get_epo_token(client: httpx.AsyncClient) -> str:
         raise HTTPException(status_code=500, detail="EPO authentication failed")
     
     return response.json()["access_token"]
+
+
+def build_v26_core_queries(molecule: str, brand: str) -> List[str]:
+    """Queries v26 COMPROVADAS (173 WOs)"""
+    queries = []
+    
+    # Core molecule
+    queries.append(f'txt="{molecule}"')
+    queries.append(f'ti="{molecule}"')
+    queries.append(f'ab="{molecule}"')
+    
+    if brand:
+        queries.append(f'txt="{brand}"')
+        queries.append(f'ti="{brand}"')
+    
+    # Therapeutic/mechanism queries (v26 proven)
+    queries.append('txt="nonsteroidal antiandrogen"')
+    queries.append('txt="androgen receptor antagonist"')
+    queries.append('ti="androgen receptor" and ti="antagonist"')
+    queries.append('ti="androgen receptor" and ti="inhibitor"')
+    
+    return queries
+
+
+def build_cortellis_inspired_queries(molecule: str, enriched_data: Dict) -> List[str]:
+    """Queries inspiradas em Cortellis"""
+    queries = []
+    
+    # Category 1: FORMULATION (Cortellis type)
+    queries.append(f'txt="{molecule}" and txt="formulation"')
+    queries.append(f'txt="{molecule}" and txt="pharmaceutical composition"')
+    queries.append(f'txt="{molecule}" and txt="tablet"')
+    queries.append(f'txt="{molecule}" and txt="capsule"')
+    
+    # Category 2: CRYSTALLINE FORMS
+    queries.append(f'txt="{molecule}" and txt="crystalline"')
+    queries.append(f'txt="{molecule}" and txt="polymorph"')
+    queries.append(f'txt="{molecule}" and txt="crystal"')
+    
+    # Category 3: SALT FORMS
+    queries.append(f'txt="{molecule}" and txt="salt"')
+    queries.append(f'txt="{molecule}" and txt="mesylate"')
+    
+    # Category 4: SYNTHESIS/PROCESS
+    queries.append(f'txt="{molecule}" and txt="synthesis"')
+    queries.append(f'txt="{molecule}" and txt="preparation"')
+    queries.append(f'txt="{molecule}" and txt="process"')
+    
+    # Category 5: THERAPEUTIC USE
+    queries.append(f'txt="{molecule}" and txt="prostate cancer"')
+    queries.append(f'txt="{molecule}" and txt="castration resistant"')
+    queries.append(f'txt="{molecule}" and txt="treatment"')
+    
+    # Category 6: DRUG COMBINATIONS
+    queries.append(f'txt="{molecule}" and txt="combination"')
+    
+    # Category 7: IPC CODES (Cortellis usa muito!)
+    queries.append('ic="A61K31/4439"')  # Darolutamide class
+    queries.append('ic="A61K31/44"')    # Pyridines
+    queries.append('ic="A61K9"')        # Medicinal preparations
+    queries.append('ic="A61P35"')       # Antineoplastic
+    
+    return queries
+
+
+def build_dynamic_queries(enriched_data: Dict) -> List[str]:
+    """Queries dinâmicas com filtro"""
+    queries = []
+    
+    # Dev codes FILTRADOS
+    dev_codes = filter_dev_codes_for_epo(enriched_data.get("dev_codes", []))
+    for code in dev_codes[:10]:
+        queries.append(f'txt="{code}"')
+    
+    # Companies FILTRADAS
+    companies = filter_companies_for_epo(enriched_data.get("companies", []))
+    for company in companies[:5]:
+        queries.append(f'pa="{company}" and ti="receptor"')
+        queries.append(f'pa="{company}" and ic="A61K31"')
+    
+    return queries
 
 
 async def search_epo(client: httpx.AsyncClient, token: str, query: str, state: SearchState) -> List[str]:
@@ -131,7 +262,7 @@ async def search_related_wos_FIXED(client: httpx.AsyncClient, token: str, found_
     
     logger.info(f"   🔄 EPO priority search: Checking {len(found_wos[:15])} WOs...")
     
-    for wo in found_wos[:15]:
+    for wo in found_wos[:15]:  # Aumentado de 10 para 15
         try:
             response = await client.get(
                 f"https://ops.epo.org/3.2/rest-services/family/publication/docdb/{wo}",
@@ -311,15 +442,15 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
 @app.get("/")
 async def root():
     return {
-        "message": "Pharmyrus v27.4 DYNAMIC - 100% Agnóstico", 
-        "version": "27.4",
-        "strategy": "Completely dynamic - works for ANY molecule"
+        "message": "Pharmyrus v27.3 HYBRID SUPREME", 
+        "version": "27.3",
+        "strategy": "v26 proven queries + Cortellis-inspired + Fixed priority search"
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "27.4"}
+    return {"status": "healthy", "version": "27.3"}
 
 
 @app.get("/countries")
@@ -329,7 +460,7 @@ async def list_countries():
 
 @app.post("/search")
 async def search_patents(request: SearchRequest):
-    """Busca 100% DINÂMICA - funciona para QUALQUER molécula"""
+    """Busca HYBRID: v26 + Cortellis + Dynamic filtered"""
     
     start_time = datetime.now()
     
@@ -341,7 +472,7 @@ async def search_patents(request: SearchRequest):
         target_countries = ["BR"]
     
     logger.info(f"{'='*80}")
-    logger.info(f"🚀 PHARMYRUS v27.4 DYNAMIC SEARCH STARTED")
+    logger.info(f"🚀 PHARMYRUS v27.3 HYBRID SEARCH STARTED")
     logger.info(f"{'='*80}")
     logger.info(f"Molecule: {molecule}")
     logger.info(f"Brand: {brand}")
@@ -349,14 +480,10 @@ async def search_patents(request: SearchRequest):
     
     state = SearchState(molecule)
     
-    # Initialize modules
-    data_enrichment = DataEnrichment()
-    google_crawler = GooglePatentsCrawler()
-    
     async with httpx.AsyncClient() as client:
         # ===== LAYER 0: DATA ENRICHMENT =====
         logger.info(f"\n{'='*80}")
-        logger.info(f"📊 LAYER 0: DATA ENRICHMENT (100% Dynamic)")
+        logger.info(f"📊 LAYER 0: DATA ENRICHMENT")
         logger.info(f"{'='*80}")
         
         enriched_data = await data_enrichment.run_all_enrichment(client, molecule, brand)
@@ -364,36 +491,28 @@ async def search_patents(request: SearchRequest):
         state.mark_enrichment_complete("openfda")
         state.mark_enrichment_complete("pubmed")
         
-        logger.info(f"   ✅ Enrichment complete:")
-        logger.info(f"      - Synonyms: {len(enriched_data.get('synonyms', []))}")
-        logger.info(f"      - Dev codes: {len(enriched_data.get('dev_codes', []))}")
-        logger.info(f"      - Companies: {len(enriched_data.get('companies', []))}")
-        
-        # ===== LAYER 1: EPO OPS (100% DYNAMIC) =====
+        # ===== LAYER 1: EPO OPS HYBRID =====
         logger.info(f"\n{'='*80}")
-        logger.info(f"🔵 LAYER 1: EPO OPS (100% DYNAMIC)")
+        logger.info(f"🔵 LAYER 1: EPO OPS (HYBRID v26 + Cortellis)")
         logger.info(f"{'='*80}")
         
         token = await get_epo_token(client)
         logger.info("   ✅ EPO token obtained")
         
-        # Build queries using DYNAMIC QUERY BUILDER (100% AGNÓSTICO!)
-        query_builder = DynamicQueryBuilder(molecule, brand, enriched_data)
+        # Build queries using EXPERT QUERY BUILDER
+        query_builder = ExpertQueryBuilder(molecule, brand, enriched_data)
         queries = query_builder.build_all_queries()
         query_stats = query_builder.get_query_stats(queries)
         
         state.epo_status["queries_total"] = len(queries)
-        logger.info(f"   📊 Generated {len(queries)} DYNAMIC queries:")
-        logger.info(f"      - Core (molecule/brand/codes): {query_stats['by_category']['core']}")
-        logger.info(f"      - Formulation (universal): {query_stats['by_category']['formulation']}")
-        logger.info(f"      - Crystalline (universal): {query_stats['by_category']['crystalline']}")
-        logger.info(f"      - Salt (universal): {query_stats['by_category']['salt']}")
-        logger.info(f"      - Process (universal): {query_stats['by_category']['process']}")
-        logger.info(f"      - Combination (universal): {query_stats['by_category']['combination']}")
-        logger.info(f"      - Mechanism (from enrichment): {query_stats['by_category']['mechanism']}")
-        logger.info(f"      - Indication (from enrichment): {query_stats['by_category']['indication']}")
-        logger.info(f"      - Companies (from enrichment): {query_stats['by_category']['companies']}")
-        logger.info(f"      - IPC generic: {query_stats['by_category']['ipc_generic']}")
+        logger.info(f"   📊 Generated {len(queries)} EXPERT queries:")
+        logger.info(f"      - v26 proven: {query_stats['by_category']['v26_proven']}")
+        logger.info(f"      - Combination therapy: {query_stats['by_category']['combination_therapy']}")
+        logger.info(f"      - Formulation: {query_stats['by_category']['formulation']}")
+        logger.info(f"      - Crystalline: {query_stats['by_category']['crystalline']}")
+        logger.info(f"      - IPC codes: {query_stats['by_category']['ipc_codes']}")
+        logger.info(f"      - Companies: {query_stats['by_category']['companies']}")
+        logger.info(f"      - Others: {len(queries) - sum([query_stats['by_category']['v26_proven'], query_stats['by_category']['combination_therapy'], query_stats['by_category']['formulation'], query_stats['by_category']['crystalline'], query_stats['by_category']['ipc_codes'], query_stats['by_category']['companies']])}")
         
         # Text search
         epo_wos = set()
@@ -420,7 +539,7 @@ async def search_patents(request: SearchRequest):
                 logger.info(f"   ✅ EPO priority search: 0 additional WOs")
         
         # Citation search (improved: 10 WOs)
-        key_wos = list(epo_wos)[:10]
+        key_wos = list(epo_wos)[:10]  # Aumentado de 5 para 10
         citation_wos = set()
         for wo in key_wos:
             citing = await search_citations(client, token, wo, state)
@@ -492,7 +611,7 @@ async def search_patents(request: SearchRequest):
         
         # Final summary
         logger.info(f"\n{'='*80}")
-        logger.info(f"🎉 SEARCH COMPLETE - 100% DYNAMIC")
+        logger.info(f"🎉 SEARCH COMPLETE")
         logger.info(f"{'='*80}")
         logger.info(f"Total WOs: {len(all_wos)}")
         logger.info(f"Total Patents: {len(all_patents)}")
@@ -507,8 +626,8 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v27.4 DYNAMIC",
-                "strategy": "100% agnóstico - works for ANY molecule"
+                "version": "Pharmyrus v27.3 HYBRID SUPREME",
+                "strategy": "v26 proven + Cortellis-inspired + Fixed priority"
             },
             "enrichment": {
                 "synonyms_found": len(enriched_data.get("synonyms", [])),
@@ -528,11 +647,10 @@ async def search_patents(request: SearchRequest):
             "wo_patents": sorted(list(all_wos)),
             "patents_by_country": patents_by_country,
             "all_patents": all_patents,
-            "search_state": state.get_summary(),
-            "query_breakdown": query_stats
+            "search_state": state.get_summary()
         }
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
