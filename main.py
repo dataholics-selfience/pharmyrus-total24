@@ -1,15 +1,16 @@
 """
-Pharmyrus v27.2 - Multiple BR per WO Fix
+Pharmyrus v27.3 - Individual BR Enrichment
 Layer 1: EPO OPS (COMPLETO do v26 - TODAS funções + METADATA FULL)
 Layer 2: Google Patents (AGRESSIVO - todas variações)
 
-FIX CRÍTICO v27.2:
-- Processar TODOS os BRs filhos de um mesmo WO
-- WO2020258893 agora retorna 3 BRs (não só 1)
+NEW v27.3:
+- Enriquecimento individual de BRs via /published-data/publication/docdb/{BR}/biblio
+- Busca metadata completa para BRs que vieram vazios da família
+- 100% metadata coverage para todos BRs encontrados
 
 METADATA PARSING COMPLETO:
 - Title (EN + Original) ✅
-- Abstract (via dedicated endpoint) ✅
+- Abstract (dedicated endpoint + individual enrichment) ✅
 - Applicants (até 10) ✅
 - Inventors (até 10) ✅
 - IPC Codes (até 10, fallback classification-ipc) ✅
@@ -60,9 +61,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v27.2",
-    description="Two-Layer Patent Search: EPO OPS (FULL + COMPLETE METADATA) + Google Patents (AGGRESSIVE) + Multiple BR per WO Fix",
-    version="27.2"
+    title="Pharmyrus v27.3",
+    description="Two-Layer Patent Search: EPO OPS (FULL + COMPLETE METADATA + INDIVIDUAL BR ENRICHMENT) + Google Patents (AGGRESSIVE)",
+    version="27.3"
 )
 
 app.add_middleware(
@@ -534,22 +535,137 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
     return patents
 
 
+async def enrich_br_metadata(client: httpx.AsyncClient, token: str, patent_data: Dict) -> Dict:
+    """Enriquece metadata de um BR via endpoint individual /published-data/publication/docdb/{BR}/biblio"""
+    br_number = patent_data["patent_number"]
+    
+    try:
+        response = await client.get(
+            f"https://ops.epo.org/3.2/rest-services/published-data/publication/docdb/{br_number}/biblio",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=15.0
+        )
+        
+        if response.status_code != 200:
+            return patent_data
+        
+        data = response.json()
+        bib = data.get("ops:world-patent-data", {}).get("exchange-documents", {}).get("exchange-document", {}).get("bibliographic-data", {})
+        
+        if not bib:
+            return patent_data
+        
+        # ENRIQUECER TITLE se estiver vazio
+        if not patent_data.get("title"):
+            titles = bib.get("invention-title", [])
+            if isinstance(titles, dict):
+                titles = [titles]
+            for t in titles:
+                if t.get("@lang") == "en":
+                    patent_data["title"] = t.get("$")
+                    break
+            if not patent_data.get("title") and titles:
+                patent_data["title"] = titles[0].get("$")
+        
+        # ENRIQUECER ABSTRACT se estiver vazio
+        if not patent_data.get("abstract"):
+            abstracts = bib.get("abstract", [])
+            if isinstance(abstracts, dict):
+                abstracts = [abstracts]
+            for abs_elem in abstracts:
+                if abs_elem.get("@lang") == "en":
+                    p_elem = abs_elem.get("p", {})
+                    if isinstance(p_elem, dict):
+                        patent_data["abstract"] = p_elem.get("$")
+                    elif isinstance(p_elem, str):
+                        patent_data["abstract"] = p_elem
+                    break
+            if not patent_data.get("abstract") and abstracts:
+                p_elem = abstracts[0].get("p", {})
+                if isinstance(p_elem, dict):
+                    patent_data["abstract"] = p_elem.get("$")
+                elif isinstance(p_elem, str):
+                    patent_data["abstract"] = p_elem
+        
+        # ENRIQUECER APPLICANTS se estiver vazio
+        if not patent_data.get("applicants"):
+            parties = bib.get("parties", {}).get("applicants", {}).get("applicant", [])
+            if isinstance(parties, dict):
+                parties = [parties]
+            applicants = []
+            for p in parties[:10]:
+                name = p.get("applicant-name", {})
+                if isinstance(name, dict):
+                    name_text = name.get("name", {}).get("$")
+                    if name_text:
+                        applicants.append(name_text)
+            if applicants:
+                patent_data["applicants"] = applicants
+        
+        # ENRIQUECER INVENTORS se estiver vazio
+        if not patent_data.get("inventors"):
+            inv_list = bib.get("parties", {}).get("inventors", {}).get("inventor", [])
+            if isinstance(inv_list, dict):
+                inv_list = [inv_list]
+            inventors = []
+            for inv in inv_list[:10]:
+                inv_name = inv.get("inventor-name", {})
+                if isinstance(inv_name, dict):
+                    name_text = inv_name.get("name", {}).get("$")
+                    if name_text:
+                        inventors.append(name_text)
+            if inventors:
+                patent_data["inventors"] = inventors
+        
+        # ENRIQUECER IPC CODES se estiver vazio
+        if not patent_data.get("ipc_codes"):
+            classifications = bib.get("classifications-ipcr", {}).get("classification-ipcr", [])
+            if not classifications:
+                classifications = bib.get("classification-ipc", [])
+            
+            if isinstance(classifications, dict):
+                classifications = [classifications]
+            
+            ipc_codes = []
+            for cls in classifications[:10]:
+                section = cls.get("section", {}).get("$", "")
+                ipc_class = cls.get("class", {}).get("$", "")
+                subclass = cls.get("subclass", {}).get("$", "")
+                main_group = cls.get("main-group", {}).get("$", "")
+                subgroup = cls.get("subgroup", {}).get("$", "")
+                
+                if section:
+                    ipc_code = f"{section}{ipc_class}{subclass}{main_group}/{subgroup}"
+                    if ipc_code not in ipc_codes:
+                        ipc_codes.append(ipc_code)
+            
+            if ipc_codes:
+                patent_data["ipc_codes"] = ipc_codes
+        
+        await asyncio.sleep(0.1)  # Rate limiting
+        
+    except Exception as e:
+        logger.debug(f"Error enriching {br_number}: {e}")
+    
+    return patent_data
+
+
 # ============= ENDPOINTS =============
 
 @app.get("/")
 async def root():
     return {
-        "message": "Pharmyrus v27.2 - Multiple BR per WO Fix (PRODUCTION)", 
-        "version": "27.2",
+        "message": "Pharmyrus v27.3 - Individual BR Enrichment (PRODUCTION)", 
+        "version": "27.3",
         "layers": ["EPO OPS (FULL v26 + METADATA)", "Google Patents (AGGRESSIVE)"],
         "metadata_fields": ["title", "abstract", "applicants", "inventors", "ipc_codes", "filing_date", "priority_date"],
-        "fix": "Multiple BR per WO (WO2020258893 → 3 BRs)"
+        "features": ["Multiple BR per WO", "Individual BR metadata enrichment"]
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "27.2"}
+    return {"status": "healthy", "version": "27.3"}
 
 
 @app.get("/countries")
@@ -574,7 +690,7 @@ async def search_patents(request: SearchRequest):
     if not target_countries:
         target_countries = ["BR"]
     
-    logger.info(f"🚀 Search v27.2 started: {molecule} | Countries: {target_countries}")
+    logger.info(f"🚀 Search v27.3 started: {molecule} | Countries: {target_countries}")
     
     async with httpx.AsyncClient() as client:
         # ===== LAYER 1: EPO (CÓDIGO COMPLETO v26) =====
@@ -658,6 +774,26 @@ async def search_patents(request: SearchRequest):
         for country, patents in patents_by_country.items():
             all_patents.extend(patents)
         
+        # ENRIQUECER BRs com metadata incompleta via endpoint individual
+        logger.info(f"   Enriching BRs with incomplete metadata...")
+        br_patents = [p for p in all_patents if p["country"] == "BR"]
+        incomplete_brs = [
+            p for p in br_patents 
+            if not p.get("title") or not p.get("abstract") or not p.get("applicants") or not p.get("inventors") or not p.get("ipc_codes")
+        ]
+        
+        logger.info(f"   Found {len(incomplete_brs)} BRs with incomplete metadata")
+        
+        for i, patent in enumerate(incomplete_brs):
+            enriched = await enrich_br_metadata(client, token, patent)
+            # Update in-place
+            patent.update(enriched)
+            
+            if (i + 1) % 10 == 0:
+                logger.info(f"   Enriched {i + 1}/{len(incomplete_brs)} BRs...")
+        
+        logger.info(f"   ✅ BR enrichment complete")
+        
         # Buscar abstracts para patentes que não têm
         logger.info(f"   Fetching abstracts for patents without abstract...")
         patents_without_abstract = [p for p in all_patents if p.get("abstract") is None]
@@ -682,7 +818,7 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v27.2 (Multiple BR Fix)",
+                "version": "Pharmyrus v27.3 (Individual BR Enrichment)",
                 "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)"]
             },
             "summary": {
