@@ -1089,6 +1089,8 @@ async def search_patents(request: SearchRequest):
         else:
             logger.info(f"   ✅ All BRs complete from EPO, skipping Google fallback")
         
+        logger.info(f"📊 Pre-INPI Summary: {len(all_wos)} WOs, {len(patents_by_country.get('BR', []))} BRs")
+        
         # ===== LAYER 3: INPI BRAZILIAN PATENT OFFICE =====
         logger.info("🇧🇷 LAYER 3: INPI (Brazilian Patent Office)")
         
