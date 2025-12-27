@@ -24,41 +24,81 @@ class EnhancedDataEnrichment:
     
     def detect_mechanisms(self, synonyms: List[str], abstracts: List[str] = None) -> List[str]:
         """
-        Detecta mecanismos de ação - CORTELLIS STYLE
+        Detecta mecanismos de ação - CORTELLIS STYLE (CORRIGIDO!)
         
-        Patterns:
-        - "XXX inhibitor" -> "XXX inhibitor"
-        - "XXX antagonist" -> "XXX antagonist"
-        - "XXX agonist" -> "XXX agonist"
+        Patterns ROBUSTOS:
+        - "nonsteroidal antiandrogen" ✅
+        - "PARP inhibitor" ✅
+        - "androgen receptor antagonist" ✅
+        - "anti-inflammatory" ✅
         """
         mechanisms = []
         
         # Mechanism keywords (Cortellis Action field)
+        # ORDEM IMPORTA: patterns mais específicos primeiro!
         mechanism_patterns = [
-            r'(\w+(?:\s+\w+)*)\s+(inhibitor|antagonist|agonist|modulator|blocker|activator)',
-            r'(anti[\-\s]\w+)',  # anti-inflammatory, antiandrogen
-            r'(\w+)\s+receptor\s+(inhibitor|antagonist|agonist|modulator)',
+            # 1. Multi-word + suffix (CRITICAL!)
+            r'(\w+\s+\w+\s+\w+)\s+(inhibitor|antagonist|agonist|modulator|blocker)',  # "androgen receptor antagonist"
+            r'(\w+\s+\w+)\s+(inhibitor|antagonist|agonist|modulator|blocker)',  # "PARP inhibitor", "kinase inhibitor"
+            
+            # 2. Nonsteroidal patterns (SPECIAL CASE!)
+            r'(nonsteroidal\s+\w+)',  # "nonsteroidal antiandrogen"
+            r'(non-steroidal\s+\w+)',  # "non-steroidal antiandrogen"
+            
+            # 3. Anti- patterns (CORRECTED!)
+            r'(anti-\w+)',  # "anti-inflammatory", "anti-androgen" (com hífen)
+            r'(anti\s+\w+)',  # "anti inflammatory" (com espaço)
+            r'(anti\w{6,})',  # "antiandrogen", "antiinflammatory" (palavra única, mínimo 10 chars total)
+            
+            # 4. Receptor patterns
+            r'(\w+\s+receptor)\s+(inhibitor|antagonist|agonist|modulator)',  # "androgen receptor antagonist"
+            
+            # 5. Single word + suffix (fallback)
+            r'(\w{4,})\s+(inhibitor|antagonist|agonist|modulator|blocker|activator)',  # "PARP inhibitor"
+            
+            # 6. Selective patterns
             r'(selective)\s+(\w+)\s+(inhibitor|antagonist)',
         ]
         
         all_text = synonyms + (abstracts or [])
         
+        logger.debug(f"   🔍 Searching mechanisms in {len(all_text)} texts")
+        
         for text in all_text:
-            text_lower = str(text).lower()
+            text_str = str(text)
+            text_lower = text_str.lower()
             
-            for pattern in mechanism_patterns:
+            # Debug: log se contém palavras-chave
+            if any(kw in text_lower for kw in ['inhibitor', 'antagonist', 'agonist', 'anti']):
+                logger.debug(f"      Checking: {text_str[:100]}")
+            
+            for i, pattern in enumerate(mechanism_patterns):
                 matches = re.finditer(pattern, text_lower, re.I)
                 for match in matches:
                     # Extrair mecanismo completo
                     if len(match.groups()) == 2:
+                        # Padrão com 2 grupos: "XXX" + "inhibitor"
                         mech = f"{match.group(1)} {match.group(2)}"
+                    elif len(match.groups()) == 3:
+                        # Padrão com 3 grupos: "selective" + "XXX" + "inhibitor"
+                        mech = f"{match.group(1)} {match.group(2)} {match.group(3)}"
                     else:
-                        mech = match.group(0)
+                        # Padrão com 1 grupo: "antiandrogen"
+                        mech = match.group(1) if match.groups() else match.group(0)
                     
                     # Limpar e validar
                     mech = re.sub(r'\s+', ' ', mech).strip()
-                    if len(mech) >= 5 and len(mech) <= 60:
-                        mechanisms.append(mech)
+                    
+                    # Validações
+                    if len(mech) < 5 or len(mech) > 60:
+                        continue
+                    
+                    # Não incluir se for só a palavra "anti"
+                    if mech in ['anti', 'selective']:
+                        continue
+                    
+                    logger.debug(f"      ✓ Found with pattern {i}: '{mech}'")
+                    mechanisms.append(mech)
         
         # Remove duplicatas, mantém ordem
         seen = set()
@@ -69,7 +109,13 @@ class EnhancedDataEnrichment:
                 seen.add(m_norm)
                 unique_mechs.append(m)
         
-        logger.info(f"   🎯 Detected {len(unique_mechs)} mechanisms: {unique_mechs[:5]}")
+        if unique_mechs:
+            logger.info(f"   🎯 Detected {len(unique_mechs)} mechanisms: {unique_mechs[:5]}")
+        else:
+            logger.warning(f"   ⚠️  No mechanisms detected from {len(all_text)} texts!")
+            # Debug: mostrar primeiros synonyms para investigação
+            logger.debug(f"      Sample synonyms: {synonyms[:5]}")
+        
         return unique_mechs
     
     # ============= INDICATION DETECTION (CORRIGIDO!) =============

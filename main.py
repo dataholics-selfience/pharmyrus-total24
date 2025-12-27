@@ -41,9 +41,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v28.0 PROFESSIONAL",
-    description="Patent Intelligence Platform - Industry Standard",
-    version="28.0"
+    title="Pharmyrus v28.1 HOTFIX",
+    description="Patent Intelligence Platform - Critical Fixes",
+    version="28.1"
 )
 
 app.add_middleware(
@@ -212,18 +212,27 @@ async def search_citations(client: httpx.AsyncClient, token: str, wo_number: str
 async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: str, 
                             target_countries: List[str]) -> Dict[str, List[Dict]]:
     """
-    Extrai patentes da família - PARSE COMPLETO!
+    Extrai patentes da família - PARSE COMPLETO! (CORRIGIDO v28.1)
+    
+    Handles:
+    - Error 413 (payload too large)
+    - Missing bibliographic data
+    - Safe dict access with isinstance checks
     """
     patents = {cc: [] for cc in target_countries}
     
     try:
+        # Try /biblio endpoint first
+        logger.debug(f"   Fetching family for {wo_number} with /biblio...")
         response = await client.get(
             f"https://ops.epo.org/3.2/rest-services/family/publication/docdb/{wo_number}/biblio",
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=30.0
         )
         
+        # Fallback if error 413
         if response.status_code == 413:
+            logger.debug(f"   Error 413 for {wo_number}, trying simple endpoint...")
             response = await client.get(
                 f"https://ops.epo.org/3.2/rest-services/family/publication/docdb/{wo_number}",
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
@@ -231,6 +240,7 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
             )
         
         if response.status_code != 200:
+            logger.debug(f"   Failed to fetch family for {wo_number}: {response.status_code}")
             return patents
         
         data = response.json()
@@ -256,84 +266,101 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                     if country in target_countries and number:
                         patent_num = f"{country}{number}"
                         
-                        # PARSE COMPLETO - bibliographic data
-                        bib = member.get("exchange-document", {}).get("bibliographic-data", {}) if "exchange-document" in member else {}
+                        # PARSE COMPLETO - bibliographic data (SAFE!)
+                        bib = {}
+                        has_exchange_doc = "exchange-document" in member
                         
-                        # Titles (multi-language)
-                        titles = bib.get("invention-title", [])
-                        if isinstance(titles, dict):
-                            titles = [titles]
+                        if has_exchange_doc:
+                            exchange_doc = member.get("exchange-document", {})
+                            bib = exchange_doc.get("bibliographic-data", {})
+                        
+                        # Titles (multi-language) - SAFE
                         title_en = None
                         title_orig = None
-                        for t in titles:
-                            if t.get("@lang") == "en":
-                                title_en = t.get("$")
-                            else:
-                                title_orig = t.get("$")
+                        if bib:
+                            titles = bib.get("invention-title", [])
+                            if isinstance(titles, dict):
+                                titles = [titles]
+                            for t in titles:
+                                if isinstance(t, dict):
+                                    if t.get("@lang") == "en":
+                                        title_en = t.get("$")
+                                    else:
+                                        title_orig = t.get("$")
                         
-                        # Abstract (multi-language)
-                        abstracts = bib.get("abstract", [])
-                        if isinstance(abstracts, dict):
-                            abstracts = [abstracts]
+                        # Abstract (multi-language) - SAFE
                         abstract_text = None
-                        for ab in abstracts:
-                            if ab.get("@lang") == "en":
-                                paras = ab.get("p", [])
-                                if isinstance(paras, list):
-                                    abstract_text = " ".join([p.get("$", "") for p in paras if isinstance(p, dict)])
-                                elif isinstance(paras, dict):
-                                    abstract_text = paras.get("$", "")
-                                break
+                        if bib:
+                            abstracts = bib.get("abstract", [])
+                            if isinstance(abstracts, dict):
+                                abstracts = [abstracts]
+                            for ab in abstracts:
+                                if isinstance(ab, dict) and ab.get("@lang") == "en":
+                                    paras = ab.get("p", [])
+                                    if isinstance(paras, list):
+                                        abstract_text = " ".join([p.get("$", "") for p in paras if isinstance(p, dict)])
+                                    elif isinstance(paras, dict):
+                                        abstract_text = paras.get("$", "")
+                                    break
                         
-                        # Applicants
+                        # Applicants - SAFE
                         applicants = []
-                        parties = bib.get("parties", {}).get("applicants", {}).get("applicant", [])
-                        if isinstance(parties, dict):
-                            parties = [parties]
-                        for p in parties[:10]:  # Max 10
-                            name = p.get("applicant-name", {}).get("name", {}).get("$")
-                            if name:
-                                applicants.append(name)
+                        if bib:
+                            parties = bib.get("parties", {}).get("applicants", {}).get("applicant", [])
+                            if isinstance(parties, dict):
+                                parties = [parties]
+                            for p in parties[:10]:  # Max 10
+                                if isinstance(p, dict):
+                                    name = p.get("applicant-name", {}).get("name", {}).get("$")
+                                    if name:
+                                        applicants.append(name)
                         
-                        # Inventors
+                        # Inventors - SAFE
                         inventors = []
-                        inventors_data = bib.get("parties", {}).get("inventors", {}).get("inventor", [])
-                        if isinstance(inventors_data, dict):
-                            inventors_data = [inventors_data]
-                        for inv in inventors_data[:10]:  # Max 10
-                            name = inv.get("inventor-name", {}).get("name", {}).get("$")
-                            if name:
-                                inventors.append(name)
+                        if bib:
+                            inventors_data = bib.get("parties", {}).get("inventors", {}).get("inventor", [])
+                            if isinstance(inventors_data, dict):
+                                inventors_data = [inventors_data]
+                            for inv in inventors_data[:10]:  # Max 10
+                                if isinstance(inv, dict):
+                                    name = inv.get("inventor-name", {}).get("name", {}).get("$")
+                                    if name:
+                                        inventors.append(name)
                         
-                        # IPC/CPC codes
+                        # IPC/CPC codes - SAFE
                         ipc_codes = []
-                        classifications = bib.get("classifications-ipcr", {}).get("classification-ipcr", [])
-                        if isinstance(classifications, dict):
-                            classifications = [classifications]
-                        for cls in classifications[:20]:  # Max 20
-                            text = cls.get("text", {}).get("$")
-                            if text:
-                                ipc_codes.append(text.strip())
+                        if bib:
+                            classifications = bib.get("classifications-ipcr", {}).get("classification-ipcr", [])
+                            if isinstance(classifications, dict):
+                                classifications = [classifications]
+                            for cls in classifications[:20]:  # Max 20
+                                if isinstance(cls, dict):
+                                    text = cls.get("text", {}).get("$")
+                                    if text:
+                                        ipc_codes.append(text.strip())
                         
-                        # Dates
+                        # Dates - SAFE
                         pub_date = doc_id.get("date", {}).get("$", "")
                         
-                        # Priority date
+                        # Priority date - SAFE
                         priority_date = None
-                        priority_claims = bib.get("priority-claims", {}).get("priority-claim", [])
-                        if isinstance(priority_claims, dict):
-                            priority_claims = [priority_claims]
-                        if priority_claims:
-                            first_priority = priority_claims[0]
-                            priority_doc = first_priority.get("document-id", {})
-                            priority_date = priority_doc.get("date", {}).get("$")
+                        if bib:
+                            priority_claims = bib.get("priority-claims", {}).get("priority-claim", [])
+                            if isinstance(priority_claims, dict):
+                                priority_claims = [priority_claims]
+                            if priority_claims and isinstance(priority_claims[0], dict):
+                                first_priority = priority_claims[0]
+                                priority_doc = first_priority.get("document-id", {})
+                                if isinstance(priority_doc, dict):
+                                    priority_date = priority_doc.get("date", {}).get("$")
                         
-                        # Application date
+                        # Application date - SAFE
                         filing_date = None
-                        app_ref = bib.get("application-reference", {})
-                        app_doc = app_ref.get("document-id", {})
-                        if isinstance(app_doc, dict):
-                            filing_date = app_doc.get("date", {}).get("$", "")
+                        if bib:
+                            app_ref = bib.get("application-reference", {})
+                            app_doc = app_ref.get("document-id", {})
+                            if isinstance(app_doc, dict):
+                                filing_date = app_doc.get("date", {}).get("$", "")
                         
                         patent_data = {
                             "patent_number": patent_num,
@@ -346,7 +373,7 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                             "inventors": inventors,
                             "ipc_codes": ipc_codes,
                             "publication_date": pub_date,
-                            "filing_date": filing_date,
+                            "filing_date": filing_date or "",
                             "priority_date": priority_date,
                             "kind": kind,
                             "link_espacenet": f"https://worldwide.espacenet.com/patent/search?q=pn%3D{patent_num}",
@@ -354,10 +381,16 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                             "country_name": COUNTRY_CODES.get(country, country)
                         }
                         
+                        # Debug log if we have good data
+                        if title_en or applicants or ipc_codes:
+                            logger.debug(f"      ✓ {patent_num}: title={bool(title_en)}, applicants={len(applicants)}, ipcs={len(ipc_codes)}")
+                        
                         patents[country].append(patent_data)
     
     except Exception as e:
         logger.debug(f"Error getting family for {wo_number}: {e}")
+    
+    return patents
     
     return patents
 
@@ -367,15 +400,15 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
 @app.get("/")
 async def root():
     return {
-        "message": "Pharmyrus v28.0 PROFESSIONAL - Industry Standard", 
-        "version": "28.0",
-        "strategy": "100% Dynamic + Global Best Practices"
+        "message": "Pharmyrus v28.1 HOTFIX - Critical Fixes", 
+        "version": "28.1",
+        "strategy": "100% Dynamic + Global Best Practices + Critical Fixes"
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "28.0"}
+    return {"status": "healthy", "version": "28.1"}
 
 
 @app.get("/countries")
@@ -466,9 +499,11 @@ async def search_patents(request: SearchRequest):
         state.mark_epo_phase_complete("text_search")
         logger.info(f"   ✅ EPO text search: {len(epo_wos)} WOs")
         
-        # Priority search (FIXED!)
-        if epo_wos:
-            related_wos = await search_related_wos_FIXED(client, token, list(epo_wos), state)
+        # Priority search (FIXED v28.1!)
+        logger.info(f"\n   🔄 EPO PRIORITY SEARCH")
+        if len(epo_wos) > 0:
+            logger.info(f"      Starting with {len(epo_wos)} WOs, checking top 15...")
+            related_wos = await search_related_wos_FIXED(client, token, list(epo_wos)[:15], state)
             if related_wos:
                 state.add_wos("epo_priority", set(related_wos))
                 epo_wos.update(related_wos)
@@ -477,22 +512,30 @@ async def search_patents(request: SearchRequest):
             else:
                 state.mark_epo_phase_complete("priority_search")
                 logger.info(f"   ✅ EPO priority search: 0 additional WOs")
+        else:
+            logger.warning(f"   ⚠️  No WOs to search priority for!")
+            state.mark_epo_phase_complete("priority_search")
         
         # Citation search (top 10 WOs)
-        key_wos = list(epo_wos)[:10]
-        citation_wos = set()
-        for wo in key_wos:
-            citing = await search_citations(client, token, wo, state)
-            citation_wos.update(citing)
-            await asyncio.sleep(0.2)
-        
-        if citation_wos:
-            new_from_citations = citation_wos - epo_wos
-            state.add_wos("epo_citation", new_from_citations)
-            epo_wos.update(citation_wos)
-            logger.info(f"   ✅ EPO citation search: {len(new_from_citations)} NEW WOs")
+        logger.info(f"\n   🔄 EPO CITATION SEARCH")
+        if len(epo_wos) > 0:
+            key_wos = list(epo_wos)[:10]
+            logger.info(f"      Checking citations for top {len(key_wos)} WOs...")
+            citation_wos = set()
+            for wo in key_wos:
+                citing = await search_citations(client, token, wo, state)
+                citation_wos.update(citing)
+                await asyncio.sleep(0.2)
+            
+            if citation_wos:
+                new_from_citations = citation_wos - epo_wos
+                state.add_wos("epo_citation", new_from_citations)
+                epo_wos.update(citation_wos)
+                logger.info(f"   ✅ EPO citation search: {len(new_from_citations)} NEW WOs")
+            else:
+                logger.info(f"   ✅ EPO citation search: 0 NEW WOs")
         else:
-            logger.info(f"   ✅ EPO citation search: 0 NEW WOs")
+            logger.warning(f"   ⚠️  No WOs to search citations for!")
         
         state.mark_epo_phase_complete("citation_search")
         logger.info(f"   ✅ EPO TOTAL: {len(epo_wos)} WOs")
@@ -570,8 +613,8 @@ async def search_patents(request: SearchRequest):
                     "search_date": datetime.now().isoformat(),
                     "target_countries": target_countries,
                     "elapsed_seconds": round(elapsed, 2),
-                    "version": "Pharmyrus v28.0 PROFESSIONAL",
-                    "methodology": "Cortellis + PatSnap + Questel + DWPI techniques"
+                    "version": "Pharmyrus v28.1 HOTFIX",
+                    "methodology": "Cortellis + PatSnap + Questel + DWPI + Critical Fixes"
                 },
                 "summary": {
                     "total_wos": len(all_wos),
