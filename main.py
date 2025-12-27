@@ -1,10 +1,16 @@
 """
-Pharmyrus v28.0 - INPI Brazilian Patent Office Layer
+Pharmyrus v28.3 - OPTIMIZED ARCHITECTURE + PERSISTENT LOGS
 Layer 1: EPO OPS (COMPLETO - TODAS funções + METADATA FULL)
 Layer 2: Google Patents (AGRESSIVO - todas variações + METADATA FALLBACK FIXED)
-Layer 3: INPI Brazilian Patent Office (BUSCA DIRETA + PORTUGUÊS NATIVO)
+Layer 3: INPI Brazilian Patent Office (EXECUTES FIRST - BEFORE HEAVY PROCESSING!)
 
-NEW v28.0 - INPI LAYER:
+NEW v28.3 - CRITICAL OPTIMIZATIONS:
+✅ INPI executes FIRST (after Google, before family lookups)
+✅ Family lookup LIMIT: 100 WOs (timeout protection)
+✅ PERSISTENT LOGS: /tmp/pharmyrus.log (survives crashes)
+✅ Prevents Railway timeout kills during WO processing
+
+v28.0 INPI Features (maintained):
 - Busca direta no INPI brasileiro para descobrir BRs não mapeados
 - Tradução de nomes de moléculas para português via Groq AI (gratuito)
 - Metadata em português: título_pt, resumo_pt
@@ -47,9 +53,19 @@ from google_patents_crawler import google_crawler
 # Import INPI Crawler Layer 3
 from inpi_crawler import inpi_crawler
 
-# Logging
-logging.basicConfig(level=logging.INFO)
+# Logging PERSISTENTE (arquivo + console)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s:%(name)s:%(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('/tmp/pharmyrus.log', mode='a')  # PERSISTE logs mesmo após crash
+    ]
+)
 logger = logging.getLogger("pharmyrus")
+logger.info("=" * 80)
+logger.info(f"📝 Pharmyrus v28.3 OPTIMIZED - Logs persistentes em /tmp/pharmyrus.log")
+logger.info("=" * 80)
 
 # EPO Credentials (MESMAS QUE FUNCIONAM)
 EPO_KEY = "G5wJypxeg0GXEJoMGP37tdK370aKxeMszGKAkD6QaR0yiR5X"
@@ -1026,13 +1042,54 @@ async def search_patents(request: SearchRequest):
         all_wos = epo_wos | google_wos
         logger.info(f"   ✅ Total WOs (EPO + Google): {len(all_wos)}")
         
-        # Extrair patentes dos países alvo
+        # ===== LAYER 3: INPI BRAZILIAN PATENT OFFICE (EXECUTAR PRIMEIRO!) =====
+        logger.info("=" * 80)
+        logger.info("🇧🇷 LAYER 3: INPI (Brazilian Patent Office) - EXECUTING FIRST!")
+        logger.info("=" * 80)
+        
+        # Import os para GROQ_API_KEY
+        import os
+        
+        inpi_new_brs = 0
+        inpi_enriched = 0
+        
+        try:
+            # Buscar BRs diretamente no INPI
+            logger.info(f"   📍 INPI: Searching with {len(all_wos)} WOs (top 20 for mapping)...")
+            
+            inpi_results = await inpi_crawler.search_inpi(
+                molecule=molecule,
+                brand=brand,
+                dev_codes=pubchem["dev_codes"],
+                known_wos=sorted(list(all_wos))[:20],  # Top 20 WOs para mapear BRs
+                groq_api_key=os.getenv("GROQ_API_KEY")
+            )
+            
+            logger.info(f"   ✅ INPI returned {len(inpi_results)} results")
+            
+            # Para merge posterior (após family lookups)
+            inpi_brs_found = inpi_results
+            
+        except Exception as e:
+            logger.error(f"   ❌ INPI Layer failed: {e}")
+            inpi_brs_found = []
+        
+        logger.info("=" * 80)
+        
+        # Extrair patentes dos países alvo via EPO FAMILY LOOKUPS
+        # LIMITE CRÍTICO: Apenas primeiros 100 WOs para evitar timeout!
+        logger.info("📍 EPO Family Lookups: Processing first 100 WOs (TIMEOUT PROTECTION)")
+        
         patents_by_country = {cc: [] for cc in target_countries}
         seen_patents = set()
         
-        for i, wo in enumerate(sorted(all_wos)):
+        # LIMITE: Apenas 100 WOs para evitar timeout
+        wos_to_process = sorted(all_wos)[:100]
+        logger.info(f"   Limited to {len(wos_to_process)}/{len(all_wos)} WOs for family lookup")
+        
+        for i, wo in enumerate(wos_to_process):
             if i > 0 and i % 20 == 0:
-                logger.info(f"   Processing WO {i}/{len(all_wos)}...")
+                logger.info(f"   Processing WO {i}/{len(wos_to_process)}...")
             
             family_patents = await get_family_patents(client, token, wo, target_countries)
             
@@ -1089,28 +1146,12 @@ async def search_patents(request: SearchRequest):
         else:
             logger.info(f"   ✅ All BRs complete from EPO, skipping Google fallback")
         
-        logger.info(f"📊 Pre-INPI Summary: {len(all_wos)} WOs, {len(patents_by_country.get('BR', []))} BRs")
+        logger.info(f"📊 Post-Family Summary: {len(all_wos)} WOs, {len(patents_by_country.get('BR', []))} BRs from EPO")
         
-        # ===== LAYER 3: INPI BRAZILIAN PATENT OFFICE =====
-        logger.info("🇧🇷 LAYER 3: INPI (Brazilian Patent Office)")
+        # ===== MERGE INPI RESULTS (já foram buscados antes do loop) =====
+        logger.info("🔗 Merging INPI results with EPO patents...")
         
-        # Import os para GROQ_API_KEY
-        import os
-        
-        # Buscar BRs diretamente no INPI
-        inpi_results = await inpi_crawler.search_inpi(
-            molecule=molecule,
-            brand=brand,
-            dev_codes=pubchem["dev_codes"],
-            known_wos=sorted(list(all_wos))[:20],  # Top 20 WOs para mapear BRs
-            groq_api_key=os.getenv("GROQ_API_KEY")
-        )
-        
-        # Merge INPI results com BRs existentes
-        inpi_brs_found = 0
-        inpi_new_brs = 0
-        
-        for inpi_patent in inpi_results:
+        for inpi_patent in inpi_brs_found:
             br_num = inpi_patent.get("patent_number")
             if not br_num:
                 continue
@@ -1124,51 +1165,35 @@ async def search_patents(request: SearchRequest):
                     existing_br["title_pt"] = inpi_patent["title"]
                 if inpi_patent.get("applicants") and not existing_br.get("applicants"):
                     existing_br["applicants"] = inpi_patent["applicants"]
-                inpi_brs_found += 1
+                if inpi_patent.get("abstract") and not existing_br.get("abstract"):
+                    existing_br["abstract"] = inpi_patent["abstract"]
+                inpi_enriched += 1
             else:
                 # Novo BR descoberto via INPI!
                 new_br = {
                     "patent_number": br_num,
+                    "country": "BR",
                     "title": inpi_patent.get("title", ""),
                     "title_pt": inpi_patent.get("title", ""),
+                    "abstract": inpi_patent.get("abstract", ""),
                     "filing_date": inpi_patent.get("filing_date", ""),
                     "applicants": inpi_patent.get("applicants", []),
                     "source": "INPI",
-                    "discovered_by": "Layer 3 INPI"
+                    "discovered_by": "Layer 3 INPI",
+                    "link_espacenet": f"https://worldwide.espacenet.com/patent/search?q=pn%3D{br_num}",
+                    "link_national": f"https://busca.inpi.gov.br/pePI/servlet/PatenteServletController?Action=detail&CodPedido={br_num}",
+                    "country_name": "Brazil"
                 }
                 patents_by_country["BR"].append(new_br)
-                all_patents.append(new_br)
                 inpi_new_brs += 1
                 logger.info(f"   🆕 NEW BR from INPI: {br_num}")
         
-        logger.info(f"   ✅ INPI found {inpi_brs_found} existing BRs, discovered {inpi_new_brs} NEW BRs")
+        # Rebuild all_patents list
+        all_patents = []
+        for country, patents in patents_by_country.items():
+            all_patents.extend(patents)
         
-        # Enriquecer BRs sem abstract com dados INPI (português)
-        brs_without_abstract = [p for p in patents_by_country["BR"] if not p.get("abstract")]
-        if brs_without_abstract:
-            logger.info(f"   🔍 INPI enriching {len(brs_without_abstract)} BRs without abstract...")
-            
-            for i, br_patent in enumerate(brs_without_abstract[:10]):  # Limitar a 10
-                inpi_metadata = await inpi_crawler.enrich_br_from_inpi(br_patent["patent_number"])
-                
-                if inpi_metadata:
-                    if inpi_metadata.get("abstract_pt") and not br_patent.get("abstract"):
-                        br_patent["abstract"] = inpi_metadata["abstract_pt"]
-                        br_patent["abstract_pt"] = inpi_metadata["abstract_pt"]
-                        logger.info(f"   ✅ INPI abstract found for {br_patent['patent_number']}")
-                    
-                    if inpi_metadata.get("title_pt") and not br_patent.get("title_pt"):
-                        br_patent["title_pt"] = inpi_metadata["title_pt"]
-                    
-                    if inpi_metadata.get("applicants") and not br_patent.get("applicants"):
-                        br_patent["applicants"] = inpi_metadata["applicants"]
-                
-                if (i + 1) % 5 == 0:
-                    logger.info(f"   INPI enriched {i+1}/{len(brs_without_abstract[:10])} BRs...")
-                
-                await asyncio.sleep(3)  # Rate limiting INPI
-        
-        logger.info(f"   ✅ INPI enrichment complete")
+        logger.info(f"   ✅ INPI enriched {inpi_enriched} existing BRs, discovered {inpi_new_brs} NEW BRs")
         
         # Buscar abstracts para patentes que não têm
         logger.info(f"   Fetching abstracts for patents without abstract...")
