@@ -1,17 +1,17 @@
 """
-Pharmyrus v27.1-METADATA - Complete Metadata Parsing
+Pharmyrus v27.1-FINAL - Complete Metadata Parsing (FINAL)
 Layer 1: EPO OPS (COMPLETO do v26 - TODAS funções + METADATA FULL)
 Layer 2: Google Patents (AGRESSIVO - todas variações)
 
 METADATA PARSING COMPLETO:
-- Title (EN + Original)
-- Abstract (multilingual)
-- Applicants (até 10)
-- Inventors (até 10)
-- IPC Codes (até 10)
-- Publication Date
-- Filing Date
-- Priority Date
+- Title (EN + Original) ✅
+- Abstract (via dedicated endpoint) ✅
+- Applicants (até 10) ✅
+- Inventors (até 10) ✅
+- IPC Codes (até 10, fallback classification-ipc) ✅
+- Publication Date (ISO 8601) ✅
+- Filing Date (ISO 8601) ✅
+- Priority Date (ISO 8601) ✅
 """
 
 from fastapi import FastAPI, HTTPException
@@ -37,6 +37,16 @@ logger = logging.getLogger("pharmyrus")
 EPO_KEY = "G5wJypxeg0GXEJoMGP37tdK370aKxeMszGKAkD6QaR0yiR5X"
 EPO_SECRET = "zg5AJ0EDzXdJey3GaFNM8ztMVxHKXRrAihXH93iS5ZAzKPAPMFLuVUfiEuAqpdbz"
 
+
+def format_date(date_str: str) -> str:
+    """Formata data de YYYYMMDD para YYYY-MM-DD"""
+    if not date_str or len(date_str) != 8:
+        return date_str
+    try:
+        return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+    except:
+        return date_str
+
 # Country codes supported
 COUNTRY_CODES = {
     "BR": "Brazil", "US": "United States", "EP": "European Patent",
@@ -46,9 +56,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v27.1-METADATA",
+    title="Pharmyrus v27.1-FINAL",
     description="Two-Layer Patent Search: EPO OPS (FULL + COMPLETE METADATA) + Google Patents (AGGRESSIVE)",
-    version="27.1-METADATA"
+    version="27.1-FINAL"
 )
 
 app.add_middleware(
@@ -87,6 +97,46 @@ async def get_epo_token(client: httpx.AsyncClient) -> str:
         raise HTTPException(status_code=500, detail="EPO authentication failed")
     
     return response.json()["access_token"]
+
+
+async def get_patent_abstract(client: httpx.AsyncClient, token: str, patent_number: str) -> Optional[str]:
+    """Busca abstract de uma patente via EPO API"""
+    try:
+        # Tentar formato docdb (ex: BR112017021636)
+        response = await client.get(
+            f"https://ops.epo.org/3.2/rest-services/published-data/publication/docdb/{patent_number}/abstract",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=15.0
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            abstracts = data.get("ops:world-patent-data", {}).get("exchange-documents", {}).get("exchange-document", {}).get("abstract", [])
+            
+            if isinstance(abstracts, dict):
+                abstracts = [abstracts]
+            
+            # Procurar abstract em inglês primeiro
+            for abs_item in abstracts:
+                if abs_item.get("@lang") == "en":
+                    p_elem = abs_item.get("p", {})
+                    if isinstance(p_elem, dict):
+                        return p_elem.get("$")
+                    elif isinstance(p_elem, str):
+                        return p_elem
+            
+            # Se não tem inglês, pegar qualquer idioma
+            if abstracts and len(abstracts) > 0:
+                p_elem = abstracts[0].get("p", {})
+                if isinstance(p_elem, dict):
+                    return p_elem.get("$")
+                elif isinstance(p_elem, str):
+                    return p_elem
+        
+        return None
+    except Exception as e:
+        logger.debug(f"Error fetching abstract for {patent_number}: {e}")
+        return None
 
 
 async def get_pubchem_data(client: httpx.AsyncClient, molecule: str) -> Dict:
@@ -392,9 +442,15 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                         
                         # IPC CODES
                         ipc_codes = []
+                        # Tentar classifications-ipcr primeiro
                         classifications = bib.get("classifications-ipcr", {}).get("classification-ipcr", [])
+                        if not classifications:
+                            # Fallback para classification-ipc
+                            classifications = bib.get("classification-ipc", [])
+                        
                         if isinstance(classifications, dict):
                             classifications = [classifications]
+                        
                         for cls in classifications[:10]:
                             # Montar código IPC: section + class + subclass + main-group + subgroup
                             section = cls.get("section", {}).get("$", "")
@@ -455,9 +511,9 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                             "applicants": applicants,
                             "inventors": inventors,
                             "ipc_codes": ipc_codes,
-                            "publication_date": pub_date,
-                            "filing_date": filing_date,
-                            "priority_date": priority_date,
+                            "publication_date": format_date(pub_date),
+                            "filing_date": format_date(filing_date),
+                            "priority_date": format_date(priority_date) if priority_date else None,
                             "kind": kind,
                             "link_espacenet": f"https://worldwide.espacenet.com/patent/search?q=pn%3D{patent_num}",
                             "link_national": f"https://busca.inpi.gov.br/pePI/servlet/PatenteServletController?Action=detail&CodPedido={patent_num}" if country == "BR" else None,
@@ -477,16 +533,17 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
 @app.get("/")
 async def root():
     return {
-        "message": "Pharmyrus v27.1-METADATA - Complete Metadata Parsing", 
-        "version": "27.1-METADATA",
+        "message": "Pharmyrus v27.1-FINAL - Complete Metadata Parsing (PRODUCTION)", 
+        "version": "27.1-FINAL",
         "layers": ["EPO OPS (FULL v26 + METADATA)", "Google Patents (AGGRESSIVE)"],
-        "metadata_fields": ["title", "abstract", "applicants", "inventors", "ipc_codes", "filing_date", "priority_date"]
+        "metadata_fields": ["title", "abstract", "applicants", "inventors", "ipc_codes", "filing_date", "priority_date"],
+        "improvements": ["IPC codes fixed", "Abstract enrichment", "ISO 8601 dates"]
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "27.1-METADATA"}
+    return {"status": "healthy", "version": "27.1-FINAL"}
 
 
 @app.get("/countries")
@@ -511,7 +568,7 @@ async def search_patents(request: SearchRequest):
     if not target_countries:
         target_countries = ["BR"]
     
-    logger.info(f"🚀 Search v27.1-METADATA started: {molecule} | Countries: {target_countries}")
+    logger.info(f"🚀 Search v27.1-FINAL started: {molecule} | Countries: {target_countries}")
     
     async with httpx.AsyncClient() as client:
         # ===== LAYER 1: EPO (CÓDIGO COMPLETO v26) =====
@@ -595,6 +652,19 @@ async def search_patents(request: SearchRequest):
         for country, patents in patents_by_country.items():
             all_patents.extend(patents)
         
+        # Buscar abstracts para patentes que não têm
+        logger.info(f"   Fetching abstracts for patents without abstract...")
+        patents_without_abstract = [p for p in all_patents if p.get("abstract") is None]
+        logger.info(f"   Found {len(patents_without_abstract)} patents without abstract")
+        
+        for i, patent in enumerate(patents_without_abstract[:20]):  # Limitar a 20 para não demorar muito
+            abstract = await get_patent_abstract(client, token, patent["patent_number"])
+            if abstract:
+                patent["abstract"] = abstract
+            await asyncio.sleep(0.2)
+        
+        logger.info(f"   ✅ Abstract enrichment complete")
+        
         all_patents.sort(key=lambda x: x.get("publication_date", "") or "", reverse=True)
         
         elapsed = (datetime.now() - start_time).total_seconds()
@@ -606,7 +676,7 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v27.1-METADATA (Complete Parse)",
+                "version": "Pharmyrus v27.1-FINAL (Production Ready)",
                 "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)"]
             },
             "summary": {
