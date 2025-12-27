@@ -8,10 +8,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY main.py .
-COPY data_enrichment.py .
+COPY enhanced_data_enrichment.py .
+COPY professional_query_builder.py .
 COPY google_patents_crawler.py .
 COPY search_state.py .
-COPY dynamic_query_builder.py .
 
 # Railway uses PORT env variable
 ENV PORT=8000

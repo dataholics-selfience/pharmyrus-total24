@@ -1,7 +1,7 @@
 """
-Pharmyrus v27.4 DYNAMIC - 100% AGNÓSTICO
-NADA é fixo - TUDO vem do enrichment!
-Funciona para QUALQUER molécula: darolutamide, paracetamol, niraparib, etc
+Pharmyrus v28.0 PROFESSIONAL
+100% AGNÓSTICO + TÉCNICAS GLOBAIS
+JSON dividido: Patent Discovery + R&D
 """
 
 from fastapi import FastAPI, HTTPException
@@ -16,10 +16,10 @@ import logging
 from datetime import datetime
 
 # Import custom modules
-from data_enrichment import DataEnrichment
+from enhanced_data_enrichment import EnhancedDataEnrichment
 from google_patents_crawler import GooglePatentsCrawler
 from search_state import SearchState
-from dynamic_query_builder import DynamicQueryBuilder
+from professional_query_builder import ProfessionalQueryBuilder
 
 # Logging
 logging.basicConfig(
@@ -41,9 +41,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v27.4 DYNAMIC",
-    description="100% Agnóstico - Funciona para QUALQUER molécula",
-    version="27.4"
+    title="Pharmyrus v28.0 PROFESSIONAL",
+    description="Patent Intelligence Platform - Industry Standard",
+    version="28.0"
 )
 
 app.add_middleware(
@@ -116,7 +116,7 @@ async def search_epo(client: httpx.AsyncClient, token: str, query: str, state: S
                         wos.add(f"WO{number}")
             
             state.add_query_executed("epo_text", query, len(wos))
-        
+    
     except Exception as e:
         logger.debug(f"EPO search error for '{query}': {e}")
     
@@ -125,7 +125,7 @@ async def search_epo(client: httpx.AsyncClient, token: str, query: str, state: S
 
 async def search_related_wos_FIXED(client: httpx.AsyncClient, token: str, found_wos: List[str], state: SearchState) -> List[str]:
     """
-    CORRIGIDO: Busca WOs relacionados via publication-reference (NÃO priority-claim!)
+    CORRIGIDO: Busca WOs relacionados via publication-reference
     """
     additional_wos = set()
     
@@ -148,7 +148,6 @@ async def search_related_wos_FIXED(client: httpx.AsyncClient, token: str, found_
                     members = [members]
                 
                 for m in members:
-                    # CORREÇÃO: usar publication-reference, NÃO priority-claim!
                     pub_ref = m.get("publication-reference", {})
                     doc_ids = pub_ref.get("document-id", [])
                     
@@ -212,7 +211,9 @@ async def search_citations(client: httpx.AsyncClient, token: str, wo_number: str
 
 async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: str, 
                             target_countries: List[str]) -> Dict[str, List[Dict]]:
-    """Extrai patentes da família"""
+    """
+    Extrai patentes da família - PARSE COMPLETO!
+    """
     patents = {cc: [] for cc in target_countries}
     
     try:
@@ -255,8 +256,10 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                     if country in target_countries and number:
                         patent_num = f"{country}{number}"
                         
+                        # PARSE COMPLETO - bibliographic data
                         bib = member.get("exchange-document", {}).get("bibliographic-data", {}) if "exchange-document" in member else {}
                         
+                        # Titles (multi-language)
                         titles = bib.get("invention-title", [])
                         if isinstance(titles, dict):
                             titles = [titles]
@@ -268,16 +271,69 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                             else:
                                 title_orig = t.get("$")
                         
+                        # Abstract (multi-language)
+                        abstracts = bib.get("abstract", [])
+                        if isinstance(abstracts, dict):
+                            abstracts = [abstracts]
+                        abstract_text = None
+                        for ab in abstracts:
+                            if ab.get("@lang") == "en":
+                                paras = ab.get("p", [])
+                                if isinstance(paras, list):
+                                    abstract_text = " ".join([p.get("$", "") for p in paras if isinstance(p, dict)])
+                                elif isinstance(paras, dict):
+                                    abstract_text = paras.get("$", "")
+                                break
+                        
+                        # Applicants
                         applicants = []
                         parties = bib.get("parties", {}).get("applicants", {}).get("applicant", [])
                         if isinstance(parties, dict):
                             parties = [parties]
-                        for p in parties[:5]:
+                        for p in parties[:10]:  # Max 10
                             name = p.get("applicant-name", {}).get("name", {}).get("$")
                             if name:
                                 applicants.append(name)
                         
+                        # Inventors
+                        inventors = []
+                        inventors_data = bib.get("parties", {}).get("inventors", {}).get("inventor", [])
+                        if isinstance(inventors_data, dict):
+                            inventors_data = [inventors_data]
+                        for inv in inventors_data[:10]:  # Max 10
+                            name = inv.get("inventor-name", {}).get("name", {}).get("$")
+                            if name:
+                                inventors.append(name)
+                        
+                        # IPC/CPC codes
+                        ipc_codes = []
+                        classifications = bib.get("classifications-ipcr", {}).get("classification-ipcr", [])
+                        if isinstance(classifications, dict):
+                            classifications = [classifications]
+                        for cls in classifications[:20]:  # Max 20
+                            text = cls.get("text", {}).get("$")
+                            if text:
+                                ipc_codes.append(text.strip())
+                        
+                        # Dates
                         pub_date = doc_id.get("date", {}).get("$", "")
+                        
+                        # Priority date
+                        priority_date = None
+                        priority_claims = bib.get("priority-claims", {}).get("priority-claim", [])
+                        if isinstance(priority_claims, dict):
+                            priority_claims = [priority_claims]
+                        if priority_claims:
+                            first_priority = priority_claims[0]
+                            priority_doc = first_priority.get("document-id", {})
+                            priority_date = priority_doc.get("date", {}).get("$")
+                        
+                        # Application date
+                        filing_date = None
+                        app_ref = bib.get("application-reference", {})
+                        app_doc = app_ref.get("document-id", {})
+                        if isinstance(app_doc, dict):
+                            filing_date = app_doc.get("date", {}).get("$", "")
                         
                         patent_data = {
                             "patent_number": patent_num,
@@ -285,13 +341,13 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                             "wo_primary": wo_number,
                             "title": title_en,
                             "title_original": title_orig,
-                            "abstract": None,
+                            "abstract": abstract_text,
                             "applicants": applicants,
-                            "inventors": [],
-                            "ipc_codes": [],
+                            "inventors": inventors,
+                            "ipc_codes": ipc_codes,
                             "publication_date": pub_date,
-                            "filing_date": "",
-                            "priority_date": None,
+                            "filing_date": filing_date,
+                            "priority_date": priority_date,
                             "kind": kind,
                             "link_espacenet": f"https://worldwide.espacenet.com/patent/search?q=pn%3D{patent_num}",
                             "link_national": f"https://busca.inpi.gov.br/pePI/servlet/PatenteServletController?Action=detail&CodPedido={patent_num}" if country == "BR" else None,
@@ -311,15 +367,15 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
 @app.get("/")
 async def root():
     return {
-        "message": "Pharmyrus v27.4 DYNAMIC - 100% Agnóstico", 
-        "version": "27.4",
-        "strategy": "Completely dynamic - works for ANY molecule"
+        "message": "Pharmyrus v28.0 PROFESSIONAL - Industry Standard", 
+        "version": "28.0",
+        "strategy": "100% Dynamic + Global Best Practices"
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "27.4"}
+    return {"status": "healthy", "version": "28.0"}
 
 
 @app.get("/countries")
@@ -329,7 +385,11 @@ async def list_countries():
 
 @app.post("/search")
 async def search_patents(request: SearchRequest):
-    """Busca 100% DINÂMICA - funciona para QUALQUER molécula"""
+    """
+    Busca PROFISSIONAL com JSON dividido:
+    - patent_discovery: Dados de patentes
+    - rd_intelligence: Dados para R&D
+    """
     
     start_time = datetime.now()
     
@@ -341,7 +401,7 @@ async def search_patents(request: SearchRequest):
         target_countries = ["BR"]
     
     logger.info(f"{'='*80}")
-    logger.info(f"🚀 PHARMYRUS v27.4 DYNAMIC SEARCH STARTED")
+    logger.info(f"🚀 PHARMYRUS v28.0 PROFESSIONAL SEARCH STARTED")
     logger.info(f"{'='*80}")
     logger.info(f"Molecule: {molecule}")
     logger.info(f"Brand: {brand}")
@@ -350,50 +410,44 @@ async def search_patents(request: SearchRequest):
     state = SearchState(molecule)
     
     # Initialize modules
-    data_enrichment = DataEnrichment()
+    data_enrichment = EnhancedDataEnrichment()
     google_crawler = GooglePatentsCrawler()
     
     async with httpx.AsyncClient() as client:
-        # ===== LAYER 0: DATA ENRICHMENT =====
+        # ===== LAYER 0: ENHANCED DATA ENRICHMENT =====
         logger.info(f"\n{'='*80}")
-        logger.info(f"📊 LAYER 0: DATA ENRICHMENT (100% Dynamic)")
+        logger.info(f"📊 LAYER 0: ENHANCED DATA ENRICHMENT")
         logger.info(f"{'='*80}")
         
         enriched_data = await data_enrichment.run_all_enrichment(client, molecule, brand)
         state.mark_enrichment_complete("pubchem")
         state.mark_enrichment_complete("openfda")
         state.mark_enrichment_complete("pubmed")
+        state.mark_enrichment_complete("clinicaltrials")
         
         logger.info(f"   ✅ Enrichment complete:")
         logger.info(f"      - Synonyms: {len(enriched_data.get('synonyms', []))}")
         logger.info(f"      - Dev codes: {len(enriched_data.get('dev_codes', []))}")
         logger.info(f"      - Companies: {len(enriched_data.get('companies', []))}")
+        logger.info(f"      - Mechanisms: {len(enriched_data.get('mechanisms', []))}")
+        logger.info(f"      - Indications: {len(enriched_data.get('indications', []))}")
+        logger.info(f"      - Clinical trials: {enriched_data.get('clinical_trials', {}).get('total_trials', 0)}")
         
-        # ===== LAYER 1: EPO OPS (100% DYNAMIC) =====
+        # ===== LAYER 1: EPO OPS (PROFESSIONAL QUERIES!) =====
         logger.info(f"\n{'='*80}")
-        logger.info(f"🔵 LAYER 1: EPO OPS (100% DYNAMIC)")
+        logger.info(f"🔵 LAYER 1: EPO OPS (PROFESSIONAL QUERIES)")
         logger.info(f"{'='*80}")
         
         token = await get_epo_token(client)
         logger.info("   ✅ EPO token obtained")
         
-        # Build queries using DYNAMIC QUERY BUILDER (100% AGNÓSTICO!)
-        query_builder = DynamicQueryBuilder(molecule, brand, enriched_data)
+        # Build PROFESSIONAL queries
+        query_builder = ProfessionalQueryBuilder(molecule, brand, enriched_data)
         queries = query_builder.build_all_queries()
         query_stats = query_builder.get_query_stats(queries)
         
         state.epo_status["queries_total"] = len(queries)
-        logger.info(f"   📊 Generated {len(queries)} DYNAMIC queries:")
-        logger.info(f"      - Core (molecule/brand/codes): {query_stats['by_category']['core']}")
-        logger.info(f"      - Formulation (universal): {query_stats['by_category']['formulation']}")
-        logger.info(f"      - Crystalline (universal): {query_stats['by_category']['crystalline']}")
-        logger.info(f"      - Salt (universal): {query_stats['by_category']['salt']}")
-        logger.info(f"      - Process (universal): {query_stats['by_category']['process']}")
-        logger.info(f"      - Combination (universal): {query_stats['by_category']['combination']}")
-        logger.info(f"      - Mechanism (from enrichment): {query_stats['by_category']['mechanism']}")
-        logger.info(f"      - Indication (from enrichment): {query_stats['by_category']['indication']}")
-        logger.info(f"      - Companies (from enrichment): {query_stats['by_category']['companies']}")
-        logger.info(f"      - IPC generic: {query_stats['by_category']['ipc_generic']}")
+        logger.info(f"   📊 Generated {len(queries)} PROFESSIONAL queries")
         
         # Text search
         epo_wos = set()
@@ -401,6 +455,11 @@ async def search_patents(request: SearchRequest):
             wos = await search_epo(client, token, query, state)
             epo_wos.update(wos)
             state.epo_status["queries_executed"] = i + 1
+            
+            # Log progress every 20 queries
+            if (i + 1) % 20 == 0:
+                logger.info(f"      Progress: {i+1}/{len(queries)} queries ({len(epo_wos)} WOs)")
+            
             await asyncio.sleep(0.2)
         
         state.add_wos("epo_text", epo_wos)
@@ -419,7 +478,7 @@ async def search_patents(request: SearchRequest):
                 state.mark_epo_phase_complete("priority_search")
                 logger.info(f"   ✅ EPO priority search: 0 additional WOs")
         
-        # Citation search (improved: 10 WOs)
+        # Citation search (top 10 WOs)
         key_wos = list(epo_wos)[:10]
         citation_wos = set()
         for wo in key_wos:
@@ -440,7 +499,7 @@ async def search_patents(request: SearchRequest):
         
         # ===== LAYER 2: GOOGLE PATENTS =====
         logger.info(f"\n{'='*80}")
-        logger.info(f"🟢 LAYER 2: GOOGLE PATENTS (DYNAMIC)")
+        logger.info(f"🟢 LAYER 2: GOOGLE PATENTS")
         logger.info(f"{'='*80}")
         
         google_wos = await google_crawler.enrich_with_google(
@@ -492,7 +551,7 @@ async def search_patents(request: SearchRequest):
         
         # Final summary
         logger.info(f"\n{'='*80}")
-        logger.info(f"🎉 SEARCH COMPLETE - 100% DYNAMIC")
+        logger.info(f"🎉 SEARCH COMPLETE - v28.0 PROFESSIONAL")
         logger.info(f"{'='*80}")
         logger.info(f"Total WOs: {len(all_wos)}")
         logger.info(f"Total Patents: {len(all_patents)}")
@@ -500,36 +559,74 @@ async def search_patents(request: SearchRequest):
         logger.info(f"Elapsed: {elapsed:.2f}s")
         logger.info(f"{'='*80}\n")
         
+        # ============= BUILD JSON RESPONSE (DIVIDIDO!) =============
+        
         return {
-            "metadata": {
-                "molecule": molecule,
-                "brand_name": brand,
-                "search_date": datetime.now().isoformat(),
-                "target_countries": target_countries,
-                "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v27.4 DYNAMIC",
-                "strategy": "100% agnóstico - works for ANY molecule"
+            # ===== PATENT DISCOVERY (Dados de patentes) =====
+            "patent_discovery": {
+                "metadata": {
+                    "molecule": molecule,
+                    "brand_name": brand,
+                    "search_date": datetime.now().isoformat(),
+                    "target_countries": target_countries,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "version": "Pharmyrus v28.0 PROFESSIONAL",
+                    "methodology": "Cortellis + PatSnap + Questel + DWPI techniques"
+                },
+                "summary": {
+                    "total_wos": len(all_wos),
+                    "epo_wos": len(epo_wos),
+                    "google_wos": len(google_wos),
+                    "total_patents": len(all_patents),
+                    "by_country": {c: len(patents_by_country.get(c, [])) for c in target_countries},
+                    "wos_by_source": state.get_summary()["wos_by_source"],
+                    "queries_executed": state.epo_status["queries_executed"],
+                },
+                "wo_patents": sorted(list(all_wos)),
+                "patents_by_country": patents_by_country,
+                "all_patents": all_patents,
+                "query_breakdown": query_stats,
             },
-            "enrichment": {
-                "synonyms_found": len(enriched_data.get("synonyms", [])),
-                "dev_codes_found": len(enriched_data.get("dev_codes", [])),
-                "cas_numbers_found": len(enriched_data.get("cas_numbers", [])),
-                "companies_found": len(enriched_data.get("companies", [])),
-            },
-            "summary": {
-                "total_wos": len(all_wos),
-                "epo_wos": len(epo_wos),
-                "google_wos": len(google_wos),
-                "total_patents": len(all_patents),
-                "by_country": {c: len(patents_by_country.get(c, [])) for c in target_countries},
-                "wos_by_source": state.get_summary()["wos_by_source"],
-                "assignees_discovered": state.get_summary()["assignees_found"],
-            },
-            "wo_patents": sorted(list(all_wos)),
-            "patents_by_country": patents_by_country,
-            "all_patents": all_patents,
-            "search_state": state.get_summary(),
-            "query_breakdown": query_stats
+            
+            # ===== R&D INTELLIGENCE (Dados para P&D) =====
+            "rd_intelligence": {
+                "chemical_data": {
+                    "molecular_formula": enriched_data.get("formula"),
+                    "inchi": enriched_data.get("inchi"),
+                    "smiles": enriched_data.get("smiles"),
+                    "cas_numbers": enriched_data.get("cas_numbers", []),
+                },
+                "pharmacology": {
+                    "mechanisms_of_action": enriched_data.get("mechanisms", []),
+                    "therapeutic_indications": enriched_data.get("indications", []),
+                    "therapeutic_area": enriched_data.get("therapeutic_area"),
+                },
+                "development": {
+                    "dev_codes": enriched_data.get("dev_codes", []),
+                    "brand_names": enriched_data.get("brand_names", []),
+                    "synonyms": enriched_data.get("synonyms", []),
+                },
+                "companies": {
+                    "patent_assignees": state.get_summary()["assignees_found"],
+                    "sponsors": enriched_data.get("companies", []),
+                },
+                "clinical_trials": {
+                    "total_trials": enriched_data.get("clinical_trials", {}).get("total_trials", 0),
+                    "phases": enriched_data.get("clinical_trials", {}).get("phases", []),
+                    "conditions": enriched_data.get("clinical_trials", {}).get("conditions", []),
+                    "sponsors": enriched_data.get("clinical_trials", {}).get("sponsors", []),
+                    "trials": enriched_data.get("clinical_trials", {}).get("trials", [])[:10],  # Top 10
+                },
+                "literature": {
+                    "pubmed_articles": enriched_data.get("pubmed_articles", 0),
+                },
+                "patent_classification": {
+                    "patent_types": enriched_data.get("patent_types", []),
+                    "ipc_codes_detected": list(set([
+                        ipc for p in all_patents for ipc in p.get("ipc_codes", [])
+                    ]))[:50],  # Top 50
+                },
+            }
         }
 
 
