@@ -1,7 +1,17 @@
 """
-Pharmyrus v27.1 - CORRECTED Two-Layer Patent Search
-Layer 1: EPO OPS (COMPLETO do v26 - TODAS funções)
+Pharmyrus v27.1-METADATA - Complete Metadata Parsing
+Layer 1: EPO OPS (COMPLETO do v26 - TODAS funções + METADATA FULL)
 Layer 2: Google Patents (AGRESSIVO - todas variações)
+
+METADATA PARSING COMPLETO:
+- Title (EN + Original)
+- Abstract (multilingual)
+- Applicants (até 10)
+- Inventors (até 10)
+- IPC Codes (até 10)
+- Publication Date
+- Filing Date
+- Priority Date
 """
 
 from fastapi import FastAPI, HTTPException
@@ -36,9 +46,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v27.1",
-    description="Two-Layer Patent Search: EPO OPS (FULL) + Google Patents (AGGRESSIVE)",
-    version="27.1"
+    title="Pharmyrus v27.1-METADATA",
+    description="Two-Layer Patent Search: EPO OPS (FULL + COMPLETE METADATA) + Google Patents (AGGRESSIVE)",
+    version="27.1-METADATA"
 )
 
 app.add_middleware(
@@ -318,6 +328,7 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                         
                         bib = member.get("exchange-document", {}).get("bibliographic-data", {}) if "exchange-document" in member else {}
                         
+                        # TITLE (EN + Original)
                         titles = bib.get("invention-title", [])
                         if isinstance(titles, dict):
                             titles = [titles]
@@ -326,19 +337,113 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                         for t in titles:
                             if t.get("@lang") == "en":
                                 title_en = t.get("$")
-                            else:
+                            elif not title_orig:  # Pegar primeiro não-EN como original
                                 title_orig = t.get("$")
                         
+                        # Se não tem EN mas tem original, usar original
+                        if not title_en and title_orig:
+                            title_en = title_orig
+                        
+                        # ABSTRACT
+                        abstract_text = None
+                        abstracts = bib.get("abstract", {})
+                        if abstracts:
+                            if isinstance(abstracts, list):
+                                abstracts = abstracts[0]
+                            if isinstance(abstracts, dict):
+                                # Tentar pegar em EN primeiro
+                                if abstracts.get("@lang") == "en":
+                                    p_elem = abstracts.get("p", {})
+                                    if isinstance(p_elem, dict):
+                                        abstract_text = p_elem.get("$")
+                                    elif isinstance(p_elem, str):
+                                        abstract_text = p_elem
+                                else:
+                                    # Pegar qualquer idioma se não tem EN
+                                    p_elem = abstracts.get("p", {})
+                                    if isinstance(p_elem, dict):
+                                        abstract_text = p_elem.get("$")
+                                    elif isinstance(p_elem, str):
+                                        abstract_text = p_elem
+                        
+                        # APPLICANTS
                         applicants = []
                         parties = bib.get("parties", {}).get("applicants", {}).get("applicant", [])
                         if isinstance(parties, dict):
                             parties = [parties]
-                        for p in parties[:5]:
-                            name = p.get("applicant-name", {}).get("name", {}).get("$")
-                            if name:
-                                applicants.append(name)
+                        for p in parties[:10]:  # Aumentar limite para 10
+                            name = p.get("applicant-name", {})
+                            if isinstance(name, dict):
+                                name_text = name.get("name", {}).get("$")
+                                if name_text:
+                                    applicants.append(name_text)
                         
+                        # INVENTORS
+                        inventors = []
+                        inv_list = bib.get("parties", {}).get("inventors", {}).get("inventor", [])
+                        if isinstance(inv_list, dict):
+                            inv_list = [inv_list]
+                        for inv in inv_list[:10]:
+                            inv_name = inv.get("inventor-name", {})
+                            if isinstance(inv_name, dict):
+                                name_text = inv_name.get("name", {}).get("$")
+                                if name_text:
+                                    inventors.append(name_text)
+                        
+                        # IPC CODES
+                        ipc_codes = []
+                        classifications = bib.get("classifications-ipcr", {}).get("classification-ipcr", [])
+                        if isinstance(classifications, dict):
+                            classifications = [classifications]
+                        for cls in classifications[:10]:
+                            # Montar código IPC: section + class + subclass + main-group + subgroup
+                            section = cls.get("section", {}).get("$", "")
+                            ipc_class = cls.get("class", {}).get("$", "")
+                            subclass = cls.get("subclass", {}).get("$", "")
+                            main_group = cls.get("main-group", {}).get("$", "")
+                            subgroup = cls.get("subgroup", {}).get("$", "")
+                            
+                            if section:
+                                ipc_code = f"{section}{ipc_class}{subclass}{main_group}/{subgroup}"
+                                if ipc_code not in ipc_codes:
+                                    ipc_codes.append(ipc_code)
+                        
+                        # DATES
                         pub_date = doc_id.get("date", {}).get("$", "")
+                        
+                        # Filing date - buscar em application-reference
+                        filing_date = ""
+                        app_ref = pub_ref.get("document-id", [])
+                        if isinstance(app_ref, dict):
+                            app_ref = [app_ref]
+                        for app_doc in app_ref:
+                            if app_doc.get("@document-id-type") == "docdb":
+                                filing_date = app_doc.get("date", {}).get("$", "")
+                                if filing_date:
+                                    break
+                        
+                        # Se não encontrou, tentar em outro lugar
+                        if not filing_date:
+                            app_ref_alt = member.get("application-reference", {}).get("document-id", [])
+                            if isinstance(app_ref_alt, dict):
+                                app_ref_alt = [app_ref_alt]
+                            for app_doc in app_ref_alt:
+                                if app_doc.get("@document-id-type") == "docdb":
+                                    filing_date = app_doc.get("date", {}).get("$", "")
+                                    if filing_date:
+                                        break
+                        
+                        # Priority date - buscar em priority-claims
+                        priority_date = None
+                        priority_claims = member.get("priority-claim", [])
+                        if isinstance(priority_claims, dict):
+                            priority_claims = [priority_claims]
+                        for pc in priority_claims:
+                            pc_doc = pc.get("document-id", {})
+                            if isinstance(pc_doc, dict):
+                                priority_date = pc_doc.get("date", {}).get("$")
+                                if priority_date:
+                                    break
                         
                         patent_data = {
                             "patent_number": patent_num,
@@ -346,13 +451,13 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
                             "wo_primary": wo_number,
                             "title": title_en,
                             "title_original": title_orig,
-                            "abstract": None,
+                            "abstract": abstract_text,
                             "applicants": applicants,
-                            "inventors": [],
-                            "ipc_codes": [],
+                            "inventors": inventors,
+                            "ipc_codes": ipc_codes,
                             "publication_date": pub_date,
-                            "filing_date": "",
-                            "priority_date": None,
+                            "filing_date": filing_date,
+                            "priority_date": priority_date,
                             "kind": kind,
                             "link_espacenet": f"https://worldwide.espacenet.com/patent/search?q=pn%3D{patent_num}",
                             "link_national": f"https://busca.inpi.gov.br/pePI/servlet/PatenteServletController?Action=detail&CodPedido={patent_num}" if country == "BR" else None,
@@ -372,15 +477,16 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
 @app.get("/")
 async def root():
     return {
-        "message": "Pharmyrus v27.1 - Two-Layer Patent Search (CORRECTED)", 
-        "version": "27.1",
-        "layers": ["EPO OPS (FULL v26)", "Google Patents (AGGRESSIVE)"]
+        "message": "Pharmyrus v27.1-METADATA - Complete Metadata Parsing", 
+        "version": "27.1-METADATA",
+        "layers": ["EPO OPS (FULL v26 + METADATA)", "Google Patents (AGGRESSIVE)"],
+        "metadata_fields": ["title", "abstract", "applicants", "inventors", "ipc_codes", "filing_date", "priority_date"]
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "27.1"}
+    return {"status": "healthy", "version": "27.1-METADATA"}
 
 
 @app.get("/countries")
@@ -405,7 +511,7 @@ async def search_patents(request: SearchRequest):
     if not target_countries:
         target_countries = ["BR"]
     
-    logger.info(f"🚀 Search v27.1 started: {molecule} | Countries: {target_countries}")
+    logger.info(f"🚀 Search v27.1-METADATA started: {molecule} | Countries: {target_countries}")
     
     async with httpx.AsyncClient() as client:
         # ===== LAYER 1: EPO (CÓDIGO COMPLETO v26) =====
@@ -500,7 +606,7 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v27.1 CORRECTED",
+                "version": "Pharmyrus v27.1-METADATA (Complete Parse)",
                 "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)"]
             },
             "summary": {
