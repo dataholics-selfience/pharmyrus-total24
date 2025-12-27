@@ -187,6 +187,7 @@ class GooglePatentsCrawler:
         """
         Busca AGRESSIVA no Google Patents
         Executa TODAS as variações de busca
+        FALLBACK: Se Playwright falha, usa httpx
         """
         print(f"🔍 Layer 2 AGGRESSIVE: Buscando WOs para {molecule}...")
         
@@ -195,6 +196,8 @@ class GooglePatentsCrawler:
         
         print(f"   📊 Total de {len(search_terms)} variações de busca!")
         
+        # TENTAR PLAYWRIGHT PRIMEIRO
+        playwright_success = False
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
@@ -266,9 +269,51 @@ class GooglePatentsCrawler:
                     print(f"   ⚠️  Google Patents direct error: {e}")
                 
                 await browser.close()
+                playwright_success = True
         
         except Exception as e:
-            print(f"❌ Erro no crawler: {e}")
+            print(f"❌ Playwright FALHOU: {e}")
+            print(f"   🔄 FALLBACK: Tentando httpx simples...")
+        
+        # FALLBACK HTTPX se Playwright falhou ou encontrou poucos WOs
+        if not playwright_success or len(new_wos) < 20:
+            print(f"   🔄 HTTPX FALLBACK ativado...")
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                    # Buscar diretamente Google Patents (mais confiável)
+                    priority_searches = [
+                        f"{molecule}",
+                        f"{molecule} WO",
+                        f"{molecule} patent",
+                        brand if brand else None,
+                    ] + dev_codes[:5]
+                    
+                    priority_searches = [s for s in priority_searches if s]
+                    
+                    for search_term in priority_searches:
+                        try:
+                            # Google Patents API search
+                            url = f"https://patents.google.com/?q={search_term}&country=WO&num=100"
+                            response = await client.get(url, headers={
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                            })
+                            
+                            if response.status_code == 200:
+                                wos_found = re.findall(r'WO\d{4}\d{6}', response.text)
+                                for wo in wos_found:
+                                    if wo not in existing_wos and wo not in new_wos:
+                                        new_wos.add(wo)
+                                        print(f"   ✅ HTTPX: {wo}")
+                            
+                            await asyncio.sleep(2)
+                        
+                        except Exception as e:
+                            print(f"   ⚠️  HTTPX error for {search_term}: {e}")
+                            continue
+            
+            except Exception as e:
+                print(f"❌ HTTPX FALLBACK também falhou: {e}")
         
         return new_wos
     

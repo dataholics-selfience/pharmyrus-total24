@@ -1,24 +1,26 @@
 """
-Pharmyrus v27.5 - Google Patents Metadata Fallback
+Pharmyrus v27.5-FIXED - Google Patents Metadata Fallback (CORRECTED)
 Layer 1: EPO OPS (COMPLETO do v26 - TODAS funções + METADATA FULL)
-Layer 2: Google Patents (AGRESSIVO - todas variações + METADATA FALLBACK)
+Layer 2: Google Patents (AGRESSIVO - todas variações + METADATA FALLBACK FIXED)
 
-NEW v27.5:
-- Google Patents HTML parsing para campos vazios após EPO
-- Fallback para abstract, applicants, inventors, IPC codes
-- Deduplicação: EPO prioritário, Google preenche gaps
-- Regex robusto para HTML de patents.google.com
+NEW v27.5-FIXED:
+- Google Patents HTML parsing CORRIGIDO para campos vazios após EPO
+- Parse robusto: section itemprop="abstract" + div class="abstract"
+- Meta tags DC.contributor + dd itemprop para applicants/inventors
+- Tentativa EN e PT para maximizar cobertura
+- Decodificação HTML entities (&#34;, &quot;, etc)
+- Rate limiting 0.3s + timeout 15s
+- Debug logging para cada campo encontrado
 - ~99%+ metadata coverage esperado
 
-PREVIOUS v27.4:
-- Parse ROBUSTO de abstracts: múltiplos formatos, lista/dict, múltiplos parágrafos
-- Parse ROBUSTO de IPC codes: 3 formatos diferentes, múltiplos fallbacks
-- Aplicado tanto em get_family_patents quanto em enrich_br_metadata
-- ~95%+ abstract coverage, ~95%+ IPC coverage
+BASEADO EM v27.4:
+- Parse ROBUSTO de abstracts: múltiplos formatos EPO
+- Parse ROBUSTO de IPC codes: 3 formatos diferentes EPO
+- 260 WOs, 42 BRs mantidos ✅
 
 METADATA PARSING COMPLETO:
 - Title (EN + Original) ✅
-- Abstract (robust EPO parse + Google fallback) ✅✅✅
+- Abstract (robust EPO parse + Google fallback FIXED) ✅✅✅
 - Applicants (EPO + Google fallback, até 10) ✅✅
 - Inventors (EPO + Google fallback, até 10) ✅✅
 - IPC Codes (robust EPO parse + Google fallback, até 10) ✅✅✅
@@ -69,9 +71,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v27.5",
-    description="Two-Layer Patent Search: EPO OPS (FULL + ROBUST PARSE + BR ENRICHMENT) + Google Patents (AGGRESSIVE + METADATA FALLBACK)",
-    version="27.5"
+    title="Pharmyrus v27.5-FIXED",
+    description="Two-Layer Patent Search: EPO OPS (FULL + ROBUST PARSE + BR ENRICHMENT) + Google Patents (AGGRESSIVE + METADATA FALLBACK FIXED)",
+    version="27.5-FIXED"
 )
 
 app.add_middleware(
@@ -821,71 +823,101 @@ async def enrich_from_google_patents(client: httpx.AsyncClient, patent_data: Dic
         return patent_data
     
     try:
-        url = f"https://patents.google.com/patent/{br_number}/en"
-        response = await client.get(url, timeout=15.0, follow_redirects=True)
-        
-        if response.status_code != 200:
-            return patent_data
-        
-        html = response.text
-        
-        # Parse ABSTRACT se estiver vazio
-        if not patent_data.get("abstract"):
-            # Google Patents: <div class="abstract">
+        # Tentar versão EN primeiro, depois PT
+        for lang in ['en', 'pt']:
+            url = f"https://patents.google.com/patent/{br_number}/{lang}"
+            response = await client.get(url, timeout=15.0, follow_redirects=True)
+            
+            if response.status_code != 200:
+                continue
+            
+            html = response.text
             import re
-            abstract_match = re.search(r'<div[^>]*class="[^"]*abstract[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL | re.IGNORECASE)
-            if abstract_match:
-                abstract_html = abstract_match.group(1)
-                # Limpar HTML tags
-                abstract_text = re.sub(r'<[^>]+>', '', abstract_html)
-                # Limpar whitespace
-                abstract_text = ' '.join(abstract_text.split())
-                if abstract_text and len(abstract_text) > 20:  # Mínimo 20 chars
-                    patent_data["abstract"] = abstract_text[:2000]  # Max 2000 chars
-        
-        # Parse APPLICANTS se estiver vazio
-        if not patent_data.get("applicants"):
-            # Google Patents: <dd itemprop="applicantName">
-            applicants = re.findall(r'<dd[^>]*itemprop="applicantName"[^>]*>(.*?)</dd>', html, re.DOTALL)
-            if applicants:
-                clean_applicants = []
-                for app in applicants[:10]:
-                    app_text = re.sub(r'<[^>]+>', '', app).strip()
-                    if app_text:
-                        clean_applicants.append(app_text)
-                if clean_applicants:
-                    patent_data["applicants"] = clean_applicants
-        
-        # Parse INVENTORS se estiver vazio
-        if not patent_data.get("inventors"):
-            # Google Patents: <dd itemprop="inventorName">
-            inventors = re.findall(r'<dd[^>]*itemprop="inventorName"[^>]*>(.*?)</dd>', html, re.DOTALL)
-            if inventors:
-                clean_inventors = []
-                for inv in inventors[:10]:
-                    inv_text = re.sub(r'<[^>]+>', '', inv).strip()
-                    if inv_text:
-                        clean_inventors.append(inv_text)
-                if clean_inventors:
-                    patent_data["inventors"] = clean_inventors
-        
-        # Parse IPC CODES se estiver vazio
-        if not patent_data.get("ipc_codes"):
-            # Google Patents: <span itemprop="Classifi­cation">
-            ipc_matches = re.findall(r'<span[^>]*itemprop="Classifi[^"]*cation"[^>]*>(.*?)</span>', html, re.DOTALL)
-            if ipc_matches:
-                ipc_codes = []
-                for ipc in ipc_matches[:10]:
-                    ipc_text = re.sub(r'<[^>]+>', '', ipc).strip()
-                    if ipc_text and len(ipc_text) >= 4:
-                        ipc_codes.append(ipc_text)
+            
+            # Parse ABSTRACT se estiver vazio
+            if not patent_data.get("abstract"):
+                # Método 1: <div class="abstract">
+                abstract_match = re.search(r'<div[^>]*class="abstract"[^>]*>(.*?)</div>', html, re.DOTALL)
+                if not abstract_match:
+                    # Método 2: <section itemprop="abstract"><div itemprop="content">
+                    abstract_match = re.search(r'<section[^>]*itemprop="abstract"[^>]*>.*?<div[^>]*itemprop="content"[^>]*>(.*?)</div>', html, re.DOTALL)
+                
+                if abstract_match:
+                    abstract_html = abstract_match.group(1)
+                    # Extrair texto de dentro de tags <div class="abstract">
+                    inner_abstract = re.search(r'<div[^>]*class="abstract"[^>]*>(.*?)</div>', abstract_html, re.DOTALL)
+                    if inner_abstract:
+                        abstract_html = inner_abstract.group(1)
+                    
+                    # Limpar HTML tags mas preservar conteúdo
+                    abstract_text = re.sub(r'<[^>]+>', ' ', abstract_html)
+                    # Decodificar entidades HTML
+                    abstract_text = abstract_text.replace('&quot;', '"').replace('&#34;', '"')
+                    abstract_text = abstract_text.replace('&lt;', '<').replace('&gt;', '>')
+                    abstract_text = abstract_text.replace('&amp;', '&')
+                    # Limpar whitespace excessivo
+                    abstract_text = ' '.join(abstract_text.split())
+                    # Limpar separador "---" comum em patents BR
+                    abstract_text = re.sub(r'-{10,}.*', '', abstract_text).strip()
+                    
+                    if abstract_text and len(abstract_text) > 20:
+                        patent_data["abstract"] = abstract_text[:3000]
+                        logger.debug(f"   ✅ Abstract found for {br_number} ({len(abstract_text)} chars)")
+                        break  # Achou, não precisa tentar outro idioma
+            
+            # Parse APPLICANTS se estiver vazio
+            if not patent_data.get("applicants"):
+                # Método 1: meta DC.contributor scheme="assignee"
+                applicants = re.findall(r'<meta[^>]+name="DC\.contributor"[^>]+content="([^"]+)"[^>]+scheme="assignee"', html)
+                if not applicants:
+                    # Método 2: dd itemprop="assigneeName" ou "applicantName"
+                    applicants = re.findall(r'<dd[^>]*itemprop="(?:assignee|applicant)Name"[^>]*>(.*?)</dd>', html, re.DOTALL)
+                    applicants = [re.sub(r'<[^>]+>', '', a).strip() for a in applicants]
+                
+                if applicants:
+                    clean_applicants = [a for a in applicants[:10] if a]
+                    if clean_applicants:
+                        patent_data["applicants"] = clean_applicants
+                        logger.debug(f"   ✅ {len(clean_applicants)} applicants found for {br_number}")
+            
+            # Parse INVENTORS se estiver vazio
+            if not patent_data.get("inventors"):
+                # Método 1: meta DC.contributor scheme="inventor"
+                inventors = re.findall(r'<meta[^>]+name="DC\.contributor"[^>]+content="([^"]+)"[^>]+scheme="inventor"', html)
+                if not inventors:
+                    # Método 2: dd itemprop="inventorName"
+                    inventors = re.findall(r'<dd[^>]*itemprop="inventorName"[^>]*>(.*?)</dd>', html, re.DOTALL)
+                    inventors = [re.sub(r'<[^>]+>', '', i).strip() for i in inventors]
+                
+                if inventors:
+                    clean_inventors = [i for i in inventors[:10] if i]
+                    if clean_inventors:
+                        patent_data["inventors"] = clean_inventors
+                        logger.debug(f"   ✅ {len(clean_inventors)} inventors found for {br_number}")
+            
+            # Parse IPC CODES se estiver vazio  
+            if not patent_data.get("ipc_codes"):
+                # Buscar em meta tags ou spans
+                ipc_codes = re.findall(r'<span[^>]*itemprop="Classifi[^"]*cation"[^>]*>([^<]+)</span>', html)
                 if ipc_codes:
-                    patent_data["ipc_codes"] = ipc_codes
+                    clean_codes = []
+                    for code in ipc_codes[:10]:
+                        code = code.strip()
+                        if code and len(code) >= 4:
+                            clean_codes.append(code)
+                    if clean_codes:
+                        patent_data["ipc_codes"] = clean_codes
+                        logger.debug(f"   ✅ {len(clean_codes)} IPC codes found for {br_number}")
+            
+            # Se encontrou pelo menos um campo, sucesso
+            if (patent_data.get("abstract") or patent_data.get("applicants") or 
+                patent_data.get("inventors") or patent_data.get("ipc_codes")):
+                break
         
-        await asyncio.sleep(0.2)  # Rate limiting Google
+        await asyncio.sleep(0.3)  # Rate limiting Google
         
     except Exception as e:
-        logger.debug(f"Error fetching Google Patents for {br_number}: {e}")
+        logger.debug(f"   ❌ Error fetching Google Patents for {br_number}: {e}")
     
     return patent_data
 
@@ -896,7 +928,7 @@ async def enrich_from_google_patents(client: httpx.AsyncClient, patent_data: Dic
 async def root():
     return {
         "message": "Pharmyrus v27.4 - Robust Abstract & IPC Parse (PRODUCTION)", 
-        "version": "27.5",
+        "version": "27.5-FIXED",
         "layers": ["EPO OPS (FULL v26 + METADATA)", "Google Patents (AGGRESSIVE)"],
         "metadata_fields": ["title", "abstract", "applicants", "inventors", "ipc_codes", "filing_date", "priority_date"],
         "features": ["Multiple BR per WO", "Individual BR enrichment", "Robust abstract/IPC parse"]
@@ -905,7 +937,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "27.5"}
+    return {"status": "healthy", "version": "27.5-FIXED"}
 
 
 @app.get("/countries")
@@ -930,7 +962,7 @@ async def search_patents(request: SearchRequest):
     if not target_countries:
         target_countries = ["BR"]
     
-    logger.info(f"🚀 Search v27.5 started: {molecule} | Countries: {target_countries}")
+    logger.info(f"🚀 Search v27.5-FIXED started: {molecule} | Countries: {target_countries}")
     
     async with httpx.AsyncClient() as client:
         # ===== LAYER 1: EPO (CÓDIGO COMPLETO v26) =====
@@ -1078,7 +1110,7 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v27.5 (Google Fallback)",
+                "version": "Pharmyrus v27.5-FIXED (Google Fallback CORRECTED)",
                 "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)"]
             },
             "summary": {
