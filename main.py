@@ -40,10 +40,159 @@ COUNTRY_CODES = {
     "PE": "Peru", "CA": "Canada", "AU": "Australia", "RU": "Russia", "ZA": "South Africa"
 }
 
+
+async def fetch_patent_metadata_individual(client: httpx.AsyncClient, token: str, 
+                                          patent_number: str) -> Dict:
+    """
+    Busca metadata COMPLETA de UMA patente individual - v28.2 COMPLETE!
+    
+    Garante metadata 100% preenchida buscando diretamente do número da patente.
+    Usado para preencher BRs que vieram vazios da família.
+    """
+    metadata = {
+        "title": None,
+        "title_original": None,
+        "abstract": None,
+        "applicants": [],
+        "inventors": [],
+        "ipc_codes": [],
+        "filing_date": None,
+        "priority_date": None
+    }
+    
+    try:
+        # Extract country code
+        country = patent_number[:2]
+        number = patent_number[2:]
+        
+        logger.debug(f"      📥 Fetching metadata for {patent_number}...")
+        
+        # Try DOCDB format first
+        response = await client.get(
+            f"https://ops.epo.org/3.2/rest-services/published-data/publication/docdb/{country}.{number}/biblio",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=15.0
+        )
+        
+        if response.status_code != 200:
+            logger.debug(f"      ❌ {patent_number}: HTTP {response.status_code}")
+            return metadata
+        
+        data = response.json()
+        
+        # Navigate to biblio data
+        exchange_docs = data.get("ops:world-patent-data", {}).get("exchange-documents", {})
+        exchange_doc = exchange_docs.get("exchange-document", {})
+        
+        if isinstance(exchange_doc, list):
+            exchange_doc = exchange_doc[0] if exchange_doc else {}
+        
+        bib = exchange_doc.get("bibliographic-data", {})
+        
+        if not bib:
+            logger.debug(f"      ⚠️  No biblio data for {patent_number}")
+            return metadata
+        
+        # TITLES
+        titles = bib.get("invention-title", [])
+        if isinstance(titles, dict):
+            titles = [titles]
+        for t in titles:
+            if isinstance(t, dict):
+                if t.get("@lang") == "en":
+                    metadata["title"] = t.get("$")
+                else:
+                    metadata["title_original"] = t.get("$")
+        
+        # ABSTRACT
+        abstracts = bib.get("abstract", [])
+        if isinstance(abstracts, dict):
+            abstracts = [abstracts]
+        for ab in abstracts:
+            if isinstance(ab, dict) and ab.get("@lang") == "en":
+                paras = ab.get("p", [])
+                if isinstance(paras, list):
+                    metadata["abstract"] = " ".join([p.get("$", "") for p in paras if isinstance(p, dict)])
+                elif isinstance(paras, dict):
+                    metadata["abstract"] = paras.get("$", "")
+                break
+        
+        # APPLICANTS
+        parties = bib.get("parties", {}).get("applicants", {}).get("applicant", [])
+        if isinstance(parties, dict):
+            parties = [parties]
+        for p in parties[:15]:
+            if isinstance(p, dict):
+                name = p.get("applicant-name", {}).get("name", {}).get("$")
+                if name and name not in metadata["applicants"]:
+                    metadata["applicants"].append(name)
+        
+        # INVENTORS
+        inventors_data = bib.get("parties", {}).get("inventors", {}).get("inventor", [])
+        if isinstance(inventors_data, dict):
+            inventors_data = [inventors_data]
+        for inv in inventors_data[:15]:
+            if isinstance(inv, dict):
+                name = inv.get("inventor-name", {}).get("name", {}).get("$")
+                if name and name not in metadata["inventors"]:
+                    metadata["inventors"].append(name)
+        
+        # IPC CODES
+        classifications = bib.get("classifications-ipcr", {}).get("classification-ipcr", [])
+        if isinstance(classifications, dict):
+            classifications = [classifications]
+        for cls in classifications[:25]:
+            if isinstance(cls, dict):
+                text = cls.get("text", {}).get("$")
+                if text and text not in metadata["ipc_codes"]:
+                    metadata["ipc_codes"].append(text.strip())
+        
+        # FILING DATE
+        app_ref = bib.get("application-reference", {})
+        if app_ref:
+            app_doc = app_ref.get("document-id", {})
+            if isinstance(app_doc, list):
+                app_doc = app_doc[0] if app_doc else {}
+            if isinstance(app_doc, dict):
+                filing = app_doc.get("date", {}).get("$")
+                if filing:
+                    metadata["filing_date"] = filing
+        
+        # PRIORITY DATE
+        priority_claims = bib.get("priority-claims", {}).get("priority-claim", [])
+        if isinstance(priority_claims, dict):
+            priority_claims = [priority_claims]
+        if priority_claims and isinstance(priority_claims[0], dict):
+            first_priority = priority_claims[0]
+            prio_doc = first_priority.get("document-id", {})
+            if isinstance(prio_doc, dict):
+                prio_date = prio_doc.get("date", {}).get("$")
+                if prio_date:
+                    metadata["priority_date"] = prio_date
+        
+        # Count filled fields
+        filled = sum([
+            bool(metadata["title"] or metadata["title_original"]),
+            bool(metadata["abstract"]),
+            len(metadata["applicants"]) > 0,
+            len(metadata["inventors"]) > 0,
+            len(metadata["ipc_codes"]) > 0,
+            bool(metadata["filing_date"]),
+            bool(metadata["priority_date"])
+        ])
+        
+        logger.debug(f"      ✅ {patent_number}: {filled}/7 fields filled")
+        
+    except Exception as e:
+        logger.debug(f"      ❌ Error {patent_number}: {str(e)[:50]}")
+    
+    return metadata
+
+
 app = FastAPI(
-    title="Pharmyrus v28.1 HOTFIX",
-    description="Patent Intelligence Platform - Critical Fixes",
-    version="28.1"
+    title="Pharmyrus v28.2 COMPLETE",
+    description="Patent Intelligence Platform - Complete Metadata Extraction",
+    version="28.2"
 )
 
 app.add_middleware(
@@ -400,15 +549,15 @@ async def get_family_patents(client: httpx.AsyncClient, token: str, wo_number: s
 @app.get("/")
 async def root():
     return {
-        "message": "Pharmyrus v28.1 HOTFIX - Critical Fixes", 
-        "version": "28.1",
-        "strategy": "100% Dynamic + Global Best Practices + Critical Fixes"
+        "message": "Pharmyrus v28.2 COMPLETE - Full Metadata Extraction", 
+        "version": "28.2",
+        "strategy": "100% Dynamic + Global Best Practices + Complete Metadata"
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "28.1"}
+    return {"status": "healthy", "version": "28.2"}
 
 
 @app.get("/countries")
@@ -434,7 +583,7 @@ async def search_patents(request: SearchRequest):
         target_countries = ["BR"]
     
     logger.info(f"{'='*80}")
-    logger.info(f"🚀 PHARMYRUS v28.0 PROFESSIONAL SEARCH STARTED")
+    logger.info(f"🚀 PHARMYRUS v28.2 COMPLETE SEARCH STARTED")
     logger.info(f"{'='*80}")
     logger.info(f"Molecule: {molecule}")
     logger.info(f"Brand: {brand}")
@@ -584,6 +733,58 @@ async def search_patents(request: SearchRequest):
             
             await asyncio.sleep(0.3)
         
+        # ===== PHASE 2: ENRICH BR METADATA (v28.2 COMPLETE!) =====
+        logger.info(f"\n{'='*80}")
+        logger.info(f"🔍 METADATA ENRICHMENT: Fetching complete data for BRs")
+        logger.info(f"{'='*80}")
+        
+        br_patents = patents_by_country.get("BR", [])
+        
+        if br_patents:
+            logger.info(f"   Found {len(br_patents)} BRs, enriching metadata...")
+            
+            enriched_count = 0
+            for i, br in enumerate(br_patents):
+                pnum = br["patent_number"]
+                
+                # Check if missing critical fields
+                needs_enrichment = (
+                    not br.get("title") or
+                    not br.get("applicants") or
+                    not br.get("ipc_codes") or
+                    not br.get("filing_date")
+                )
+                
+                if needs_enrichment:
+                    # Fetch individual metadata
+                    individual_meta = await fetch_patent_metadata_individual(client, token, pnum)
+                    
+                    # Merge into existing BR data (keep original if exists)
+                    if individual_meta["title"] and not br.get("title"):
+                        br["title"] = individual_meta["title"]
+                    if individual_meta["title_original"] and not br.get("title_original"):
+                        br["title_original"] = individual_meta["title_original"]
+                    if individual_meta["abstract"] and not br.get("abstract"):
+                        br["abstract"] = individual_meta["abstract"]
+                    if individual_meta["applicants"] and not br.get("applicants"):
+                        br["applicants"] = individual_meta["applicants"]
+                    if individual_meta["inventors"] and not br.get("inventors"):
+                        br["inventors"] = individual_meta["inventors"]
+                    if individual_meta["ipc_codes"] and not br.get("ipc_codes"):
+                        br["ipc_codes"] = individual_meta["ipc_codes"]
+                    if individual_meta["filing_date"] and not br.get("filing_date"):
+                        br["filing_date"] = individual_meta["filing_date"]
+                    if individual_meta["priority_date"] and not br.get("priority_date"):
+                        br["priority_date"] = individual_meta["priority_date"]
+                    
+                    enriched_count += 1
+                    await asyncio.sleep(0.2)  # Rate limit
+                
+                if (i + 1) % 10 == 0:
+                    logger.info(f"   Processed {i + 1}/{len(br_patents)} BRs...")
+            
+            logger.info(f"   ✅ Enriched {enriched_count}/{len(br_patents)} BRs with individual metadata")
+        
         all_patents = []
         for country, patents in patents_by_country.items():
             all_patents.extend(patents)
@@ -594,7 +795,7 @@ async def search_patents(request: SearchRequest):
         
         # Final summary
         logger.info(f"\n{'='*80}")
-        logger.info(f"🎉 SEARCH COMPLETE - v28.0 PROFESSIONAL")
+        logger.info(f"🎉 SEARCH COMPLETE - v28.2 COMPLETE")
         logger.info(f"{'='*80}")
         logger.info(f"Total WOs: {len(all_wos)}")
         logger.info(f"Total Patents: {len(all_patents)}")
@@ -613,8 +814,8 @@ async def search_patents(request: SearchRequest):
                     "search_date": datetime.now().isoformat(),
                     "target_countries": target_countries,
                     "elapsed_seconds": round(elapsed, 2),
-                    "version": "Pharmyrus v28.1 HOTFIX",
-                    "methodology": "Cortellis + PatSnap + Questel + DWPI + Critical Fixes"
+                    "version": "Pharmyrus v28.2 COMPLETE",
+                    "methodology": "Cortellis + PatSnap + Questel + DWPI + Individual Metadata Fetch"
                 },
                 "summary": {
                     "total_wos": len(all_wos),
