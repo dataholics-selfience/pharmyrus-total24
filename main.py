@@ -1,14 +1,26 @@
 """
-Pharmyrus v28.3 - OPTIMIZED ARCHITECTURE + PERSISTENT LOGS
+Pharmyrus v28.6 - INPI MULTIPLE RUNS + MASSIVE DEBUG LOGS
 Layer 1: EPO OPS (COMPLETO - TODAS funções + METADATA FULL)
 Layer 2: Google Patents (AGRESSIVO - todas variações + METADATA FALLBACK FIXED)
-Layer 3: INPI Brazilian Patent Office (EXECUTES FIRST - BEFORE HEAVY PROCESSING!)
+Layer 3: INPI Brazilian Patent Office (EXECUTES 3X - AFTER EACH DISCOVERY LAYER!)
 
-NEW v28.3 - CRITICAL OPTIMIZATIONS:
-✅ INPI executes FIRST (after Google, before family lookups)
-✅ Family lookup LIMIT: 100 WOs (timeout protection)
-✅ PERSISTENT LOGS: /tmp/pharmyrus.log (survives crashes)
-✅ Prevents Railway timeout kills during WO processing
+🔥 NEW v28.6 - FORCED INPI EXECUTION:
+✅ INPI RUN #1: After EPO discovers WOs
+✅ INPI RUN #2: After Google discovers additional WOs
+✅ INPI RUN #3: After EPO Family lookups complete
+✅ MASSIVE DEBUG LOGGING - every step logged
+✅ FORCED execution - cannot be skipped
+✅ Cumulative BR discovery across all runs
+
+v28.5 (maintained):
+- groq==0.4.2 in requirements.txt
+- Version string updated
+- Python boolean fix (False not false)
+
+v28.3 (maintained):
+- Family lookup LIMIT: 100 WOs (timeout protection)
+- PERSISTENT LOGS: /tmp/pharmyrus.log (survives crashes)
+- Prevents Railway timeout kills during WO processing
 
 v28.0 INPI Features (maintained):
 - Busca direta no INPI brasileiro para descobrir BRs não mapeados
@@ -16,13 +28,6 @@ v28.0 INPI Features (maintained):
 - Metadata em português: título_pt, resumo_pt
 - Enrichment de abstracts faltantes via INPI
 - ZERO perda de WOs/BRs existentes - apenas ADICIONA
-
-v27.5-FIXED (mantido):
-- Google Patents HTML parsing CORRIGIDO
-- Parse robusto: section itemprop="abstract" + div class="abstract"  
-- Meta tags DC.contributor + dd itemprop
-- Decodificação HTML entities
-- ~93%+ metadata coverage
 
 METADATA PARSING COMPLETO:
 - Title (EN + PT via INPI) ✅✅
@@ -46,6 +51,7 @@ import re
 import json
 from datetime import datetime
 import logging
+import os  # GROQ_API_KEY
 
 # Import Google Crawler Layer 2
 from google_patents_crawler import google_crawler
@@ -64,7 +70,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pharmyrus")
 logger.info("=" * 80)
-logger.info(f"📝 Pharmyrus v28.3 OPTIMIZED - Logs persistentes em /tmp/pharmyrus.log")
+logger.info(f"📝 Pharmyrus v28.6 INPI-MULTIPLE-RUNS - Logs persistentes em /tmp/pharmyrus.log")
 logger.info("=" * 80)
 
 # EPO Credentials (MESMAS QUE FUNCIONAM)
@@ -108,6 +114,89 @@ class SearchRequest(BaseModel):
     paises_alvo: List[str] = Field(default=["BR"])
     incluir_wo: bool = True
     max_results: int = 100
+
+
+# ============= INPI HELPER FUNCTION (FORCED EXECUTION) =============
+
+async def execute_inpi_search(
+    run_number: int,
+    run_label: str,
+    molecule: str,
+    brand: str,
+    dev_codes: List[str],
+    known_wos: List[str],
+    groq_api_key: str
+) -> List[Dict]:
+    """
+    FORÇA execução do INPI com logs massivos
+    
+    Args:
+        run_number: Número da execução (1, 2, 3)
+        run_label: Label da execução (ex: "After EPO")
+        molecule: Nome da molécula
+        brand: Nome comercial
+        dev_codes: Códigos de desenvolvimento
+        known_wos: WOs conhecidos para mapear BRs
+        groq_api_key: Chave API do Groq
+    
+    Returns:
+        Lista de patentes BR encontradas
+    """
+    logger.info("=" * 100)
+    logger.info(f"🇧🇷 INPI RUN #{run_number}: {run_label}")
+    logger.info("=" * 100)
+    logger.info(f"   📊 Input: molecule={molecule}, brand={brand}")
+    logger.info(f"   📊 Dev codes: {len(dev_codes)} codes = {dev_codes[:5]}...")
+    logger.info(f"   📊 Known WOs for mapping: {len(known_wos)} WOs (using top 20)")
+    logger.info(f"   📊 Groq API key present: {bool(groq_api_key)}")
+    logger.info("")
+    
+    inpi_results = []
+    
+    try:
+        logger.info(f"   🔄 FORCING INPI execution...")
+        logger.info(f"   🔄 Calling inpi_crawler.search_inpi...")
+        
+        # FORÇA execução do INPI
+        inpi_results = await inpi_crawler.search_inpi(
+            molecule=molecule,
+            brand=brand,
+            dev_codes=dev_codes,
+            known_wos=sorted(list(known_wos))[:20],  # Top 20 WOs
+            groq_api_key=groq_api_key
+        )
+        
+        logger.info(f"   ✅ INPI RUN #{run_number} completed successfully!")
+        logger.info(f"   ✅ Found {len(inpi_results)} BR patents")
+        
+        if inpi_results:
+            logger.info(f"   📋 Sample results:")
+            for i, patent in enumerate(inpi_results[:3]):
+                logger.info(f"      BR #{i+1}: {patent.get('patent_number', 'N/A')}")
+        else:
+            logger.info(f"   ⚠️  No BR patents found in this run")
+        
+    except ImportError as e:
+        logger.error(f"   ❌ INPI RUN #{run_number} FAILED - Import Error!")
+        logger.error(f"   ❌ Error: {e}")
+        logger.error(f"   ❌ Check if inpi_crawler module is available")
+        
+    except AttributeError as e:
+        logger.error(f"   ❌ INPI RUN #{run_number} FAILED - Attribute Error!")
+        logger.error(f"   ❌ Error: {e}")
+        logger.error(f"   ❌ Check if inpi_crawler.search_inpi exists")
+        
+    except Exception as e:
+        logger.error(f"   ❌ INPI RUN #{run_number} FAILED - Unexpected Error!")
+        logger.error(f"   ❌ Error type: {type(e).__name__}")
+        logger.error(f"   ❌ Error message: {str(e)}")
+        import traceback
+        logger.error(f"   ❌ Traceback:\n{traceback.format_exc()}")
+    
+    logger.info("=" * 100)
+    logger.info("")
+    
+    return inpi_results
 
 
 # ============= LAYER 1: EPO (CÓDIGO COMPLETO v26) =============
@@ -1025,6 +1114,18 @@ async def search_patents(request: SearchRequest):
         
         logger.info(f"   ✅ EPO TOTAL: {len(epo_wos)} WOs")
         
+        # ===== INPI RUN #1: After EPO Discovery =====
+        groq_api_key = os.getenv("GROQ_API_KEY", "")
+        inpi_run1_results = await execute_inpi_search(
+            run_number=1,
+            run_label="After EPO Discovery",
+            molecule=molecule,
+            brand=brand,
+            dev_codes=pubchem["dev_codes"],
+            known_wos=list(epo_wos),
+            groq_api_key=groq_api_key
+        )
+        
         # ===== LAYER 2: GOOGLE PATENTS (AGRESSIVO) =====
         logger.info("🟢 LAYER 2: Google Patents (AGGRESSIVE)")
         
@@ -1042,39 +1143,19 @@ async def search_patents(request: SearchRequest):
         all_wos = epo_wos | google_wos
         logger.info(f"   ✅ Total WOs (EPO + Google): {len(all_wos)}")
         
-        # ===== LAYER 3: INPI BRAZILIAN PATENT OFFICE (EXECUTAR PRIMEIRO!) =====
-        logger.info("=" * 80)
-        logger.info("🇧🇷 LAYER 3: INPI (Brazilian Patent Office) - EXECUTING FIRST!")
-        logger.info("=" * 80)
+        # ===== INPI RUN #2: After Google Discovery =====
+        inpi_run2_results = await execute_inpi_search(
+            run_number=2,
+            run_label="After Google Discovery (NEW WOs)",
+            molecule=molecule,
+            brand=brand,
+            dev_codes=pubchem["dev_codes"],
+            known_wos=list(google_wos),  # APENAS os novos WOs do Google!
+            groq_api_key=groq_api_key
+        )
         
-        # Import os para GROQ_API_KEY
-        import os
-        
-        inpi_new_brs = 0
-        inpi_enriched = 0
-        
-        try:
-            # Buscar BRs diretamente no INPI
-            logger.info(f"   📍 INPI: Searching with {len(all_wos)} WOs (top 20 for mapping)...")
-            
-            inpi_results = await inpi_crawler.search_inpi(
-                molecule=molecule,
-                brand=brand,
-                dev_codes=pubchem["dev_codes"],
-                known_wos=sorted(list(all_wos))[:20],  # Top 20 WOs para mapear BRs
-                groq_api_key=os.getenv("GROQ_API_KEY")
-            )
-            
-            logger.info(f"   ✅ INPI returned {len(inpi_results)} results")
-            
-            # Para merge posterior (após family lookups)
-            inpi_brs_found = inpi_results
-            
-        except Exception as e:
-            logger.error(f"   ❌ INPI Layer failed: {e}")
-            inpi_brs_found = []
-        
-        logger.info("=" * 80)
+        # ===== INPI RUN #3: After EPO Family Lookups (placeholder - will run later) =====
+        # Esta execução será feita APÓS family lookups completar
         
         # Extrair patentes dos países alvo via EPO FAMILY LOOKUPS
         # LIMITE CRÍTICO: Apenas primeiros 100 WOs para evitar timeout!
@@ -1148,10 +1229,47 @@ async def search_patents(request: SearchRequest):
         
         logger.info(f"📊 Post-Family Summary: {len(all_wos)} WOs, {len(patents_by_country.get('BR', []))} BRs from EPO")
         
-        # ===== MERGE INPI RESULTS (já foram buscados antes do loop) =====
+        # ===== INPI RUN #3: After EPO Family Lookups =====
+        inpi_run3_results = await execute_inpi_search(
+            run_number=3,
+            run_label="After EPO Family Lookups",
+            molecule=molecule,
+            brand=brand,
+            dev_codes=pubchem["dev_codes"],
+            known_wos=list(all_wos),  # TODOS os WOs descobertos
+            groq_api_key=groq_api_key
+        )
+        
+        # ===== CONSOLIDATE ALL INPI RESULTS FROM 3 RUNS =====
+        logger.info("=" * 100)
+        logger.info("📊 CONSOLIDATING INPI RESULTS FROM ALL 3 RUNS")
+        logger.info("=" * 100)
+        logger.info(f"   RUN #1 (After EPO): {len(inpi_run1_results)} BRs")
+        logger.info(f"   RUN #2 (After Google): {len(inpi_run2_results)} BRs")
+        logger.info(f"   RUN #3 (After Family): {len(inpi_run3_results)} BRs")
+        
+        # Combinar todos os resultados INPI (removendo duplicatas)
+        all_inpi_results = []
+        seen_inpi_brs = set()
+        
+        for results_list in [inpi_run1_results, inpi_run2_results, inpi_run3_results]:
+            for patent in results_list:
+                br_num = patent.get("patent_number")
+                if br_num and br_num not in seen_inpi_brs:
+                    seen_inpi_brs.add(br_num)
+                    all_inpi_results.append(patent)
+        
+        logger.info(f"   ✅ TOTAL UNIQUE BRs from INPI: {len(all_inpi_results)}")
+        logger.info("=" * 100)
+        logger.info("")
+        
+        # ===== MERGE INPI RESULTS WITH EPO PATENTS =====
         logger.info("🔗 Merging INPI results with EPO patents...")
         
-        for inpi_patent in inpi_brs_found:
+        inpi_new_brs = 0
+        inpi_enriched = 0
+        
+        for inpi_patent in all_inpi_results:
             br_num = inpi_patent.get("patent_number")
             if not br_num:
                 continue
@@ -1219,7 +1337,7 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v28.5 (INPI Layer + DEBUG)",
+                "version": "Pharmyrus v28.6 (INPI MULTIPLE RUNS + DEBUG)",
                 "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)", "INPI Brazilian (DIRECT)"]
             },
             "summary": {
