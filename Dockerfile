@@ -11,6 +11,7 @@ COPY main.py .
 COPY data_enrichment.py .
 COPY google_patents_crawler.py .
 COPY search_state.py .
+COPY dynamic_query_builder.py .
 
 # Railway uses PORT env variable
 ENV PORT=8000
