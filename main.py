@@ -1,29 +1,29 @@
 """
-Pharmyrus v27.5-FIXED - Google Patents Metadata Fallback (CORRECTED)
-Layer 1: EPO OPS (COMPLETO do v26 - TODAS funções + METADATA FULL)
+Pharmyrus v28.0 - INPI Brazilian Patent Office Layer
+Layer 1: EPO OPS (COMPLETO - TODAS funções + METADATA FULL)
 Layer 2: Google Patents (AGRESSIVO - todas variações + METADATA FALLBACK FIXED)
+Layer 3: INPI Brazilian Patent Office (BUSCA DIRETA + PORTUGUÊS NATIVO)
 
-NEW v27.5-FIXED:
-- Google Patents HTML parsing CORRIGIDO para campos vazios após EPO
-- Parse robusto: section itemprop="abstract" + div class="abstract"
-- Meta tags DC.contributor + dd itemprop para applicants/inventors
-- Tentativa EN e PT para maximizar cobertura
-- Decodificação HTML entities (&#34;, &quot;, etc)
-- Rate limiting 0.3s + timeout 15s
-- Debug logging para cada campo encontrado
-- ~99%+ metadata coverage esperado
+NEW v28.0 - INPI LAYER:
+- Busca direta no INPI brasileiro para descobrir BRs não mapeados
+- Tradução de nomes de moléculas para português via Groq AI (gratuito)
+- Metadata em português: título_pt, resumo_pt
+- Enrichment de abstracts faltantes via INPI
+- ZERO perda de WOs/BRs existentes - apenas ADICIONA
 
-BASEADO EM v27.4:
-- Parse ROBUSTO de abstracts: múltiplos formatos EPO
-- Parse ROBUSTO de IPC codes: 3 formatos diferentes EPO
-- 260 WOs, 42 BRs mantidos ✅
+v27.5-FIXED (mantido):
+- Google Patents HTML parsing CORRIGIDO
+- Parse robusto: section itemprop="abstract" + div class="abstract"  
+- Meta tags DC.contributor + dd itemprop
+- Decodificação HTML entities
+- ~93%+ metadata coverage
 
 METADATA PARSING COMPLETO:
-- Title (EN + Original) ✅
-- Abstract (robust EPO parse + Google fallback FIXED) ✅✅✅
-- Applicants (EPO + Google fallback, até 10) ✅✅
-- Inventors (EPO + Google fallback, até 10) ✅✅
-- IPC Codes (robust EPO parse + Google fallback, até 10) ✅✅✅
+- Title (EN + PT via INPI) ✅✅
+- Abstract (EPO + Google + INPI PT) ✅✅✅
+- Applicants (EPO + Google + INPI, até 10) ✅✅✅
+- Inventors (EPO + Google, até 10) ✅✅
+- IPC Codes (EPO + Google, até 10) ✅✅
 - Publication Date (ISO 8601) ✅
 - Filing Date (ISO 8601) ✅
 - Priority Date (ISO 8601) ✅
@@ -43,6 +43,9 @@ import logging
 
 # Import Google Crawler Layer 2
 from google_patents_crawler import google_crawler
+
+# Import INPI Crawler Layer 3
+from inpi_crawler import inpi_crawler
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -71,9 +74,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v27.5-FIXED",
-    description="Two-Layer Patent Search: EPO OPS (FULL + ROBUST PARSE + BR ENRICHMENT) + Google Patents (AGGRESSIVE + METADATA FALLBACK FIXED)",
-    version="27.5-FIXED"
+    title="Pharmyrus v28.0",
+    description="Three-Layer Patent Search: EPO OPS (FULL) + Google Patents (AGGRESSIVE) + INPI Brazilian (DIRECT SEARCH)",
+    version="28.0"
 )
 
 app.add_middleware(
@@ -928,7 +931,7 @@ async def enrich_from_google_patents(client: httpx.AsyncClient, patent_data: Dic
 async def root():
     return {
         "message": "Pharmyrus v27.4 - Robust Abstract & IPC Parse (PRODUCTION)", 
-        "version": "27.5-FIXED",
+        "version": "28.0",
         "layers": ["EPO OPS (FULL v26 + METADATA)", "Google Patents (AGGRESSIVE)"],
         "metadata_fields": ["title", "abstract", "applicants", "inventors", "ipc_codes", "filing_date", "priority_date"],
         "features": ["Multiple BR per WO", "Individual BR enrichment", "Robust abstract/IPC parse"]
@@ -937,7 +940,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "27.5-FIXED"}
+    return {"status": "healthy", "version": "28.0"}
 
 
 @app.get("/countries")
@@ -1086,6 +1089,84 @@ async def search_patents(request: SearchRequest):
         else:
             logger.info(f"   ✅ All BRs complete from EPO, skipping Google fallback")
         
+        # ===== LAYER 3: INPI BRAZILIAN PATENT OFFICE =====
+        logger.info("🇧🇷 LAYER 3: INPI (Brazilian Patent Office)")
+        
+        # Import os para GROQ_API_KEY
+        import os
+        
+        # Buscar BRs diretamente no INPI
+        inpi_results = await inpi_crawler.search_inpi(
+            molecule=molecule,
+            brand=brand,
+            dev_codes=pubchem["dev_codes"],
+            groq_api_key=os.getenv("GROQ_API_KEY")
+        )
+        
+        # Merge INPI results com BRs existentes
+        inpi_brs_found = 0
+        inpi_new_brs = 0
+        
+        for inpi_patent in inpi_results:
+            br_num = inpi_patent.get("patent_number")
+            if not br_num:
+                continue
+            
+            # Check se BR já existe
+            existing_br = next((p for p in patents_by_country["BR"] if p["patent_number"] == br_num), None)
+            
+            if existing_br:
+                # Enriquecer BR existente com dados INPI (português)
+                if inpi_patent.get("title") and not existing_br.get("title_pt"):
+                    existing_br["title_pt"] = inpi_patent["title"]
+                if inpi_patent.get("applicants") and not existing_br.get("applicants"):
+                    existing_br["applicants"] = inpi_patent["applicants"]
+                inpi_brs_found += 1
+            else:
+                # Novo BR descoberto via INPI!
+                new_br = {
+                    "patent_number": br_num,
+                    "title": inpi_patent.get("title", ""),
+                    "title_pt": inpi_patent.get("title", ""),
+                    "filing_date": inpi_patent.get("filing_date", ""),
+                    "applicants": inpi_patent.get("applicants", []),
+                    "source": "INPI",
+                    "discovered_by": "Layer 3 INPI"
+                }
+                patents_by_country["BR"].append(new_br)
+                all_patents.append(new_br)
+                inpi_new_brs += 1
+                logger.info(f"   🆕 NEW BR from INPI: {br_num}")
+        
+        logger.info(f"   ✅ INPI found {inpi_brs_found} existing BRs, discovered {inpi_new_brs} NEW BRs")
+        
+        # Enriquecer BRs sem abstract com dados INPI (português)
+        brs_without_abstract = [p for p in patents_by_country["BR"] if not p.get("abstract")]
+        if brs_without_abstract:
+            logger.info(f"   🔍 INPI enriching {len(brs_without_abstract)} BRs without abstract...")
+            
+            for i, br_patent in enumerate(brs_without_abstract[:10]):  # Limitar a 10
+                inpi_metadata = await inpi_crawler.enrich_br_from_inpi(br_patent["patent_number"])
+                
+                if inpi_metadata:
+                    if inpi_metadata.get("abstract_pt") and not br_patent.get("abstract"):
+                        br_patent["abstract"] = inpi_metadata["abstract_pt"]
+                        br_patent["abstract_pt"] = inpi_metadata["abstract_pt"]
+                        logger.info(f"   ✅ INPI abstract found for {br_patent['patent_number']}")
+                    
+                    if inpi_metadata.get("title_pt") and not br_patent.get("title_pt"):
+                        br_patent["title_pt"] = inpi_metadata["title_pt"]
+                    
+                    if inpi_metadata.get("applicants") and not br_patent.get("applicants"):
+                        br_patent["applicants"] = inpi_metadata["applicants"]
+                
+                if (i + 1) % 5 == 0:
+                    logger.info(f"   INPI enriched {i+1}/{len(brs_without_abstract[:10])} BRs...")
+                
+                await asyncio.sleep(3)  # Rate limiting INPI
+        
+        logger.info(f"   ✅ INPI enrichment complete")
+        
         # Buscar abstracts para patentes que não têm
         logger.info(f"   Fetching abstracts for patents without abstract...")
         patents_without_abstract = [p for p in all_patents if p.get("abstract") is None]
@@ -1110,13 +1191,15 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v27.5-FIXED (Google Fallback CORRECTED)",
-                "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)"]
+                "version": "Pharmyrus v28.0 (INPI Layer)",
+                "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)", "INPI Brazilian (DIRECT)"]
             },
             "summary": {
                 "total_wos": len(all_wos),
                 "epo_wos": len(epo_wos),
                 "google_wos": len(google_wos),
+                "inpi_new_brs": inpi_new_brs,
+                "inpi_enriched": inpi_brs_found,
                 "total_patents": len(all_patents),
                 "by_country": {c: len(patents_by_country.get(c, [])) for c in target_countries},
                 "pubchem_dev_codes": pubchem["dev_codes"],

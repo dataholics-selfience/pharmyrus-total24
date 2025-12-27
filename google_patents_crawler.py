@@ -252,18 +252,50 @@ class GooglePatentsCrawler:
                         continue
                 
                 # Busca direta Google Patents (complementar)
+                # PRIORITY: Use dev_codes first (more reliable), then brand, then molecule
                 try:
-                    gp_url = f"https://patents.google.com/?q={molecule}&country=WO&num=100"
-                    await page.goto(gp_url, wait_until='networkidle', timeout=30000)
-                    await asyncio.sleep(random.uniform(3, 5))
+                    search_queries = []
                     
-                    content = await page.content()
-                    wos_found = re.findall(r'WO\d{4}\d{6}', content)
+                    # 1. Dev codes (highest priority - no typos!)
+                    for code in dev_codes[:3]:
+                        if code:
+                            search_queries.append(code)
                     
-                    for wo in wos_found:
-                        if wo not in existing_wos and wo not in new_wos:
-                            new_wos.add(wo)
-                            print(f"   ✅ Novo WO (Google Patents direct): {wo}")
+                    # 2. Brand name (if available)
+                    if brand:
+                        search_queries.append(brand)
+                    
+                    # 3. CAS number
+                    if cas:
+                        search_queries.append(cas)
+                    
+                    # 4. Molecule name (lowest priority - may have typos)
+                    search_queries.append(molecule)
+                    
+                    # Try each query until we find WOs
+                    for query in search_queries:
+                        if len(new_wos) >= 50:  # Stop if we found enough
+                            break
+                        
+                        try:
+                            gp_url = f"https://patents.google.com/?q={query}&country=WO&num=100"
+                            await page.goto(gp_url, wait_until='networkidle', timeout=30000)
+                            await asyncio.sleep(random.uniform(3, 5))
+                            
+                            content = await page.content()
+                            wos_found = re.findall(r'WO\d{4}\d{6}', content)
+                            
+                            for wo in wos_found:
+                                if wo not in existing_wos and wo not in new_wos:
+                                    new_wos.add(wo)
+                                    print(f"   ✅ Novo WO (Google Patents direct via {query}): {wo}")
+                            
+                            if wos_found:
+                                print(f"   📊 Found {len(wos_found)} WOs using query: {query}")
+                        
+                        except Exception as e:
+                            print(f"   ⚠️  Google Patents error for {query}: {e}")
+                            continue
                 
                 except Exception as e:
                     print(f"   ⚠️  Google Patents direct error: {e}")
