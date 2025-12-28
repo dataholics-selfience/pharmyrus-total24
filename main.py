@@ -1,43 +1,24 @@
 """
-Pharmyrus v28.6 - INPI MULTIPLE RUNS + MASSIVE DEBUG LOGS
-Layer 1: EPO OPS (COMPLETO - TODAS funções + METADATA FULL)
-Layer 2: Google Patents (AGRESSIVO - todas variações + METADATA FALLBACK FIXED)
-Layer 3: INPI Brazilian Patent Office (EXECUTES 3X - AFTER EACH DISCOVERY LAYER!)
+Pharmyrus v28.8 - INPI HTTP DIRETO (SEM PLAYWRIGHT, SEM API)
+Layer 1: EPO OPS (COMPLETO)
+Layer 2: Google Patents (AGRESSIVO)  
+Layer 3: INPI Brazilian (HTTP DIRETO - 3X RUNS!)
 
-🔥 NEW v28.6 - FORCED INPI EXECUTION:
-✅ INPI RUN #1: After EPO discovers WOs
-✅ INPI RUN #2: After Google discovers additional WOs
-✅ INPI RUN #3: After EPO Family lookups complete
-✅ MASSIVE DEBUG LOGGING - every step logged
-✅ FORCED execution - cannot be skipped
-✅ Cumulative BR discovery across all runs
+🔥 NEW v28.8 - INPI HTTP DIRETO:
+✅ POST direto para https://busca.inpi.gov.br/pePI/jsp/patentes/PatenteSearchAvancado.jsp
+✅ Parse HTML da lista de resultados
+✅ GET detalhe de cada BR
+✅ Parse completo: título, resumo, depositante, inventor
+✅ SEM Playwright - SEM problemas de detecção
+✅ SEM API externa - não depende de crawler3
+✅ INPI RUN #1: After EPO
+✅ INPI RUN #2: After Google
+✅ INPI RUN #3: After Family lookups
 
-v28.5 (maintained):
-- groq==0.4.2 in requirements.txt
-- Version string updated
-- Python boolean fix (False not false)
-
-v28.3 (maintained):
-- Family lookup LIMIT: 100 WOs (timeout protection)
-- PERSISTENT LOGS: /tmp/pharmyrus.log (survives crashes)
-- Prevents Railway timeout kills during WO processing
-
-v28.0 INPI Features (maintained):
-- Busca direta no INPI brasileiro para descobrir BRs não mapeados
-- Tradução de nomes de moléculas para português via Groq AI (gratuito)
-- Metadata em português: título_pt, resumo_pt
-- Enrichment de abstracts faltantes via INPI
-- ZERO perda de WOs/BRs existentes - apenas ADICIONA
-
-METADATA PARSING COMPLETO:
-- Title (EN + PT via INPI) ✅✅
-- Abstract (EPO + Google + INPI PT) ✅✅✅
-- Applicants (EPO + Google + INPI, até 10) ✅✅✅
-- Inventors (EPO + Google, até 10) ✅✅
-- IPC Codes (EPO + Google, até 10) ✅✅
-- Publication Date (ISO 8601) ✅
-- Filing Date (ISO 8601) ✅
-- Priority Date (ISO 8601) ✅
+v28.6 (maintained):
+- 3 execuções forçadas INPI
+- Função helper execute_inpi_search()
+- Consolidação de resultados
 """
 
 from fastapi import FastAPI, HTTPException
@@ -70,7 +51,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pharmyrus")
 logger.info("=" * 80)
-logger.info(f"📝 Pharmyrus v28.6 INPI-MULTIPLE-RUNS - Logs persistentes em /tmp/pharmyrus.log")
+logger.info(f"📝 Pharmyrus v28.8 INPI-HTTP-DIRECT - Logs persistentes em /tmp/pharmyrus.log")
 logger.info("=" * 80)
 
 # EPO Credentials (MESMAS QUE FUNCIONAM)
@@ -1337,7 +1318,7 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v28.6 (INPI MULTIPLE RUNS + DEBUG)",
+                "version": "Pharmyrus v28.8 (INPI HTTP DIRECT)",
                 "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)", "INPI Brazilian (DIRECT)"]
             },
             "summary": {
