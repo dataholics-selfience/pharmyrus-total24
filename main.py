@@ -1,24 +1,17 @@
 """
-Pharmyrus v28.8 - INPI HTTP DIRETO (SEM PLAYWRIGHT, SEM API)
-Layer 1: EPO OPS (COMPLETO)
-Layer 2: Google Patents (AGRESSIVO)  
-Layer 3: INPI Brazilian (HTTP DIRETO - 3X RUNS!)
+Pharmyrus v28.9 - ZERO PLAYWRIGHT (httpx only!)
+Layer 1: EPO OPS (HTTP direto)
+Layer 2: Google Patents (httpx + regex - NO PLAYWRIGHT!)  
+Layer 3: INPI Brazilian (httpx direto - 3X RUNS!)
 
-🔥 NEW v28.8 - INPI HTTP DIRETO:
-✅ POST direto para https://busca.inpi.gov.br/pePI/jsp/patentes/PatenteSearchAvancado.jsp
-✅ Parse HTML da lista de resultados
-✅ GET detalhe de cada BR
-✅ Parse completo: título, resumo, depositante, inventor
-✅ SEM Playwright - SEM problemas de detecção
-✅ SEM API externa - não depende de crawler3
-✅ INPI RUN #1: After EPO
-✅ INPI RUN #2: After Google
-✅ INPI RUN #3: After Family lookups
-
-v28.6 (maintained):
-- 3 execuções forçadas INPI
-- Função helper execute_inpi_search()
-- Consolidação de resultados
+🔥 NEW v28.9 - ZERO PLAYWRIGHT:
+✅ google_patents_crawler.py REESCRITO - apenas httpx
+✅ inpi_crawler.py - apenas httpx
+✅ SEM Playwright em NENHUM arquivo
+✅ Build ultra-rápido (~1 min)
+✅ Container pequeno (~200MB)
+✅ INPI 3x runs mantidos
+✅ Tradução PT via Groq mantida
 """
 
 from fastapi import FastAPI, HTTPException
@@ -51,7 +44,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pharmyrus")
 logger.info("=" * 80)
-logger.info(f"📝 Pharmyrus v28.8 INPI-HTTP-DIRECT - Logs persistentes em /tmp/pharmyrus.log")
+logger.info(f"📝 Pharmyrus v28.9 NO-PLAYWRIGHT - Logs persistentes em /tmp/pharmyrus.log")
 logger.info("=" * 80)
 
 # EPO Credentials (MESMAS QUE FUNCIONAM)
@@ -1318,7 +1311,7 @@ async def search_patents(request: SearchRequest):
                 "search_date": datetime.now().isoformat(),
                 "target_countries": target_countries,
                 "elapsed_seconds": round(elapsed, 2),
-                "version": "Pharmyrus v28.8 (INPI HTTP DIRECT)",
+                "version": "Pharmyrus v28.9 (ZERO PLAYWRIGHT)",
                 "sources": ["EPO OPS (FULL)", "Google Patents (AGGRESSIVE)", "INPI Brazilian (DIRECT)"]
             },
             "summary": {
